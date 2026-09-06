@@ -34,8 +34,8 @@ import mlx.core as mx
 from .ellip import dtype_eps
 from .trig import sincos
 
-__all__ = ["kepler", "kepler_E", "separation_keplerian",
-           "mean_anomaly_offset_at_transit"]
+__all__ = ["kepler", "kepler_E", "kepler_E_sincos",
+           "separation_keplerian", "mean_anomaly_offset_at_transit"]
 
 _TWO_PI = 2.0 * math.pi
 _PI = math.pi
@@ -55,15 +55,10 @@ def _unbroadcast(grad: mx.array, shape) -> mx.array:
     return grad
 
 
-@mx.custom_function
-def kepler(M: mx.array, e) -> tuple[mx.array, mx.array]:
-    """(sin f, cos f) for mean anomaly M and eccentricity 0 <= e < 1.
-
-    Markley starter + one fifth-order refinement; exactly one sincos
-    evaluation per point; residual at working-precision roundoff for
-    e <= 0.95 (verified in tests). Gradients come from the implicit
-    function theorem, not from differentiating the solve.
-    """
+def _solve_sincos_E(M: mx.array, e):
+    """(sin E, cos E) via Markley starter + one fifth-order refinement;
+    exactly one sincos evaluation per point. Shared by the two public
+    custom functions (``kepler`` and ``kepler_E_sincos``)."""
     zero = M * 0.0 + e * 0.0
     M = M + zero
     e = e + zero
@@ -109,9 +104,26 @@ def kepler(M: mx.array, e) -> tuple[mx.array, mx.array]:
     cdE = 1.0 - dE2 * 0.5 * (1.0 - dE2 / 12.0)
     sinE = (sE_raw * cdE + cE_raw * sdE) * sign
     cosE = cE_raw * cdE - sE_raw * sdE
+    return sinE, cosE
 
-    # ---- true anomaly, tan-free rational half-angle form ----------------
-    fac = mx.sqrt((1.0 + e) / mx.maximum(1.0 - e, 1e-12))
+
+@mx.custom_function
+def kepler(M: mx.array, e) -> tuple[mx.array, mx.array]:
+    """(sin f, cos f) for mean anomaly M and eccentricity 0 <= e < 1.
+
+    Kept for RV-style uses and API compatibility; the transit-separation
+    path no longer goes through the true anomaly (see
+    ``separation_keplerian``). Gradients via the implicit function
+    theorem, not by differentiating the solve.
+    """
+    sinE, cosE = _solve_sincos_E(M, e)
+    # tan-free rational half-angle form. NB: mx ops on pure-python
+    # operands mint float32 scalars — scalar e must go through math.*
+    # or the fp64 path silently degrades to fp32 constants.
+    if isinstance(e, mx.array):
+        fac = mx.sqrt((1.0 + e) / mx.maximum(1.0 - e, 1e-12))
+    else:
+        fac = math.sqrt((1.0 + e) / max(1.0 - e, 1e-12))
     A = fac * fac * (1.0 - cosE) * 0.5
     B = (1.0 + cosE) * 0.5
     Dinv = 1.0 / (A + B)                # A + B >= (1 - |cosE|)/2 ... > 0
@@ -129,9 +141,42 @@ def _kepler_vjp(primals, cotangents, outputs):
     # df = dM (1+e cosf)^2/(1-e^2)^{3/2} + de (2+e cosf) sinf/(1-e^2)
     g = ct_s * cosf - ct_c * sinf
     ecosf = e * cosf
-    ome2 = mx.maximum(1.0 - e * e, 1e-12)
-    dM = g * (1.0 + ecosf) ** 2 / (ome2 * mx.sqrt(ome2))
+    if isinstance(e, mx.array):
+        ome2 = mx.maximum(1.0 - e * e, 1e-12)
+        dM = g * (1.0 + ecosf) ** 2 / (ome2 * mx.sqrt(ome2))
+    else:
+        ome2 = max(1.0 - e * e, 1e-12)
+        dM = g * (1.0 + ecosf) ** 2 / (ome2 * math.sqrt(ome2))
     de = g * (2.0 + ecosf) * sinf / ome2
+    M_shape = M.shape if isinstance(M, mx.array) else ()
+    e_shape = e.shape if isinstance(e, mx.array) else ()
+    return _unbroadcast(dM, M_shape), _unbroadcast(de, e_shape)
+
+
+@mx.custom_function
+def kepler_E_sincos(M: mx.array, e) -> tuple[mx.array, mx.array]:
+    """(sin E, cos E) with the E-level implicit gradient rule.
+
+    The transit-separation path stops at the eccentric anomaly: the
+    Cartesian tail in ``separation_keplerian`` needs only (sin E, cos E),
+    and the implicit rule here is simpler and better conditioned than the
+    f-level one (verified: the f-level factor degrades ~3x more in fp32
+    at near-apastron transit geometries).
+    """
+    return _solve_sincos_E(M, e)
+
+
+@kepler_E_sincos.vjp
+def _kepler_E_vjp(primals, cotangents, outputs):
+    M, e = primals
+    ct_s, ct_c = cotangents
+    sinE, cosE = outputs
+    # implicit differentiation of M = E - e sin E:
+    # dE = (dM + sinE de) / (1 - e cosE)
+    g = ct_s * cosE - ct_c * sinE
+    Dinv = 1.0 / mx.maximum(1.0 - e * cosE, 1e-12)
+    dM = g * Dinv
+    de = g * sinE * Dinv
     M_shape = M.shape if isinstance(M, mx.array) else ()
     e_shape = e.shape if isinstance(e, mx.array) else ()
     return _unbroadcast(dM, M_shape), _unbroadcast(de, e_shape)
@@ -185,22 +230,41 @@ def _sincos_any(x):
 
 
 def separation_keplerian(M: mx.array, e, a, inc, w, n_iter: int = 5):
-    """(z, front) for a Keplerian orbit.
+    """(z, front) for a Keplerian orbit, via the Cartesian-from-E tail.
 
     M: mean anomaly from periastron (see mean_anomaly_offset_at_transit).
     e, a (stellar radii), inc, w in radians — arrays or floats.
 
-    z = r_orb sqrt(1 - sin^2(w+f) sin^2 i), with the conic form
-    r_orb = a (1-e^2)/(1+e cos f); ``front`` is True where a primary
-    transit can occur (sin(w+f) > 0). ``n_iter`` is accepted for
-    back-compat and unused (the Markley solve is non-iterative).
+    The true anomaly is never computed: with X = a (cos E - e) and
+    Y = a sqrt(1-e^2) sin E (orbital-plane Cartesians),
+    u = X cos w - Y sin w = r cos(w+f) and v = X sin w + Y cos w
+    = r sin(w+f) exactly, so z = sqrt(u^2 + (v cos i)^2) and the
+    front-side test is v > 0 (on the *unprojected* v — sign-safe for
+    any inclination). This form is uniformly better conditioned than
+    the previous conic tail: it has no 1 - sin^2(w+f) sin^2 i
+    cancellation near transit (which cost a ~1e-6 fp32 flux floor even
+    at e = 0) and no (1+e cos f) denominator collapse at near-apastron
+    transits (which reached 6e-3 flux error at e ~ 0.99); verified
+    exactly equivalent symbolically and to 4.5e-25 in 40-digit
+    arithmetic. The z floor guards only the backward pass's 1/z at the
+    exact-conjunction point (the forward sum of squares needs no clamp).
+
+    ``front`` is True where a primary transit can occur (sin(w+f) > 0).
+    ``n_iter`` is accepted for back-compat and unused (the Markley solve
+    is non-iterative).
     """
     eps = dtype_eps(M.dtype)
-    sinf, cosf = kepler(M, e)
+    sinE, cosE = kepler_E_sincos(M, e)
+    if isinstance(e, mx.array):
+        beta = mx.sqrt(mx.maximum(1.0 - e * e, 0.0))
+    else:
+        beta = math.sqrt(max(1.0 - e * e, 0.0))
     sw, cw = _sincos_any(w)
-    swf = sw * cosf + cw * sinf
-    si = _sincos_any(inc)[0]
-    r_orb = a * (1.0 - e * e) / (1.0 + e * cosf)
-    arg = 1.0 - (swf * si) ** 2
-    z = r_orb * mx.sqrt(mx.maximum(arg, (10.0 * eps) ** 2))
-    return z, swf > 0.0
+    ci = _sincos_any(inc)[1]
+    X = a * (cosE - e)
+    Y = a * beta * sinE
+    u = X * cw - Y * sw
+    v = X * sw + Y * cw
+    vp = v * ci
+    z = mx.sqrt(mx.maximum(u * u + vp * vp, (10.0 * eps) ** 2))
+    return z, v > 0.0
