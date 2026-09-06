@@ -94,6 +94,14 @@ costs 52.5 ms vs 27.3 s for reverse-mode autodiff at 1024 x 65,536 — a
 519x spread that is the number that matters for HMC sampling. batman,
 PyTransit, exoplanet-core (numpy layer), and ellc provide no gradients.
 
+## The batching rule for samplers
+
+The GPU cares only about total points per dispatch: (parameter sets) x
+(points per curve). 10,000 curves x 1,000 points = 2.9 ms as one
+batched call vs 1.9 s as 10,000 looped calls (650x). Samplers must
+evaluate all walkers/chains per call (anvil does; emcee needs
+vectorize=True); see MetalPlanet docs/sampler-integration.md.
+
 ## Reading the scaling axes
 
 * **CPU cores**: thread counts are honest core scaling for batman

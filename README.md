@@ -89,6 +89,17 @@ installed; everything else imports standalone. If you rename or move
 either repo, re-run the editable installs (`pip install -e ...`) — the
 venv stores absolute paths.
 
+## The batching rule (read this before writing a sampler)
+
+A GPU dispatch has a fixed ~0.2–0.7 ms floor; throughput comes from
+total points per call, and (parameter sets) x (points per curve) counts
+equally on both axes. Evaluate ALL walkers/chains in ONE call: 10,000
+parameter sets x 1,000 points costs 2.9 ms batched vs 1.9 s looped
+(650x). anvil does this natively; emcee needs `vectorize=True`; the
+batman-style `TransitModel.light_curve` is a one-curve API and must not
+be the inner loop of a sampler. Full guidance with code:
+[docs/sampler-integration.md](docs/sampler-integration.md).
+
 ## Performance (M2 Max, fp32, 1024 chains x 65536 points, compiled)
 
 Median of 7, each configuration in an isolated process
