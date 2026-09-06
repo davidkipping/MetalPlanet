@@ -41,6 +41,13 @@ Not (yet) supported: nonlinear/power-2/exponential limb darkening,
 `max_err`/`fac` error-tolerance machinery (nothing to tune — the model
 is closed-form).
 
+**Scope**: MetalPlanet is strictly a *forward model* — (parameters,
+times) → flux, plus that map's analytic derivatives. It contains no
+sampler, likelihood, or fitting machinery and depends only on mlx and
+numpy; samplers (anvil, emcee, …) sit on the other side of a one-way
+dependency arrow. See [CHANGELOG.md](CHANGELOG.md) for version history
+(releases are git-tagged).
+
 ## Why another transit code
 
 1. **Differentiable end to end.** The whole model — Kepler solve, orbit,
