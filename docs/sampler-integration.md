@@ -1,100 +1,182 @@
 # Driving MetalPlanet from a sampler: the batching rule
 
+Every measured number in this guide is reproducible by
+`benchmarks/verify_doc_claims.py` (results cached in
+`benchmarks/doc_claims.json`); performance figures quoted from the main
+benchmark suite cite their scripts inline.
+
 ## The one rule
 
-**Never evaluate parameter sets one at a time. Hand the model ALL of
-them in a single call.**
+**Never evaluate parameter sets one at a time. Hand the model as many
+of them as your sampler allows in a single call.**
 
 A GPU dispatch costs ~0.2–0.7 ms regardless of size, and the M2 Max
 needs ~10^5+ threads in flight before its cores are busy. The model's
-cost is therefore
+cost per likelihood evaluation is approximately
 
-    t  ≈  t_floor  +  (total points) / (~3–5 Gpt/s)
+    t  ≈  n_dispatches × t_floor  +  (total points) / R
 
-and "total points" = (parameter sets) × (points per light curve). The
-GPU does not care how the product splits — 1 curve × 10^7 points and
-10^4 curves × 10^3 points cost the same. Measured on the exact
-looped-vs-batched comparison (10,000 parameter sets × 1,000-point
-light curve):
+with R ≈ 3.5–5.5 Gpt/s for the fused kernel (the upper end in large
+compiled forward-only batches; `benchmarks/batch_scaling.json`), and
+"total points" = (parameter sets per dispatch) × (points per curve).
+The two axes are *roughly* interchangeable — but not exactly: measured
+throughput varies ~35% across splits (4.1 Gpt/s at 64×100k vs 5.5 at
+4096×100k), and the one-curve 10^7-point case through the batman-style
+frontend measures 9.3 ms (`benchmarks/speed.json`), not the ~2 ms the
+naive formula suggests. Use the formula for orders of magnitude and the
+benchmark JSONs for budgets.
+
+The rule itself is three orders of magnitude, measured
+(`verify_doc_claims.py`, 10,000 parameter sets × 1,000-point curve):
 
 | strategy | wall time | per curve |
 |---|---:|---:|
-| 10,000 separate calls (Python loop) | 1,886 ms | 189 µs |
+| 10,000 separate calls (Python loop) | ~2,900 ms | ~290 µs |
 | ONE batched call | 2.9 ms | 290 ns |
 
-**650×.** A per-walker loop silently turns MetalPlanet into the slowest
-code in the benchmark; a batched call makes it the fastest. If your
-total per call is below ~3×10^4 points, a CPU code genuinely is faster
-— batch harder (more walkers per call) or use the CPU path.
+A per-walker loop turns MetalPlanet into the slowest code in the
+benchmark; a batched call makes it the fastest. If a dispatch carries
+fewer than ~3×10^4 points, a CPU code genuinely is faster — batch
+harder or use a CPU path.
 
 ## How each kind of sampler should call the model
 
 ### anvil (native — nothing to do)
 
 `metalplanet.anvil.make_quad_transit_flux(period_ref)` returns the
-engine-contract function `model_fn(v, x)` with v = (n_chains, 8)
-parameters and x = (2, m) epoch-centered times. The engine evaluates
-every chain per likelihood call by construction; the fused Metal kernel
-receives the whole (n_chains × m) grid as one 2D dispatch. This is the
-production path (topology 2: GPU sampler + GPU model).
+engine-contract `model_fn(v, x)`: v = (n_chains, 8) parameters,
+x = (2, m) epoch-centered times. The engine evaluates every chain per
+likelihood call. Note the engine's `ChunkedGaussianLogLike` slices the
+*data* axis into 65,536-point chunks — so a 100,000-point likelihood is
+two kernel dispatches, not one; at m = 10^6 it is sixteen. That
+chunking exists for **float32 accumulation control** (a two-level
+summation tree, error O(eps·√n_chunks) instead of O(eps·n) — see
+anvil's precision.py), and you should keep it even when memory is not a
+concern. The current anvil model is the **circular v1 orbit**
+(no eccentricity parameter); eccentric orbits live in the batman-style
+frontend today and in a planned eccentric sampling target.
 
-### emcee / any ensemble sampler with a vectorized log-prob
+### The stretch move without CPU emcee: anvil's emcee facade
 
-emcee accepts `vectorize=True`: the log-prob receives the whole
-(n_walkers, ndim) array at once. Build the likelihood so ALL walkers go
-into one model call:
+If you want an emcee-style workflow but have no hard dependency on
+emcee itself, prefer `anvil.EnsembleSampler` (anvil/emcee_api.py): the
+same `(nwalkers, ndim, log_prob_fn)` + `run_mcmc` + `get_chain` surface,
+but the StretchMove runs entirely on-GPU — no per-move numpy upload,
+no device-to-host sync inside the loop. Its `log_prob_fn` must be
+batched MLX ((nwalkers, ndim) → (nwalkers,)); pair it with
+`ChunkedGaussianLogLike` exactly as `metalplanet.anvil.make_target`
+does.
+
+### CPU emcee (when you need emcee itself)
+
+emcee can batch through `vectorize=True`, **but know what it batches**:
+the default `StretchMove` is a red–blue move that updates the ensemble
+in halves, so your log-prob receives `(n_walkers/2, ndim)` — *two*
+dispatches per move, each carrying `n_walkers/2 × m` points. Size the
+ensemble so a **half**-ensemble dispatch clears the ~3×10^4-point
+floor.
+
+A correct, fast recipe (priors included — see the warning after it):
 
 ```python
 import numpy as np, mlx.core as mx, emcee
+from anvil.precision import ChunkedGaussianLogLike
 from metalplanet.anvil import make_quad_transit_flux
 from metalplanet.orbit import epoch_center_times
 
-model = make_quad_transit_flux(period_ref)           # fused Metal kernel inside
-x = mx.array(epoch_center_times(t, t0_ref, period_ref).astype(np.float32))
-y_dev = mx.array((y - 1.0).astype(np.float32))
-w = mx.array((1.0 / yerr).astype(np.float32))
+model = make_quad_transit_flux(period_ref)        # fused Metal kernel inside
+x64 = epoch_center_times(t, t0_ref, period_ref)   # float64 host preprocessing
+loglike = ChunkedGaussianLogLike(model, x64, y - 1.0, yerr)  # fp32-safe sums
+loglike_c = mx.compile(lambda v: loglike(v))      # ~2x: fuses the reduction
 
-def log_prob_all(theta):                              # theta: (n_walkers, 8)
-    v = mx.array(theta.astype(np.float32))
-    r = (y_dev - model(v, x)) * w                     # (n_walkers, m)
-    return np.array(mx.sum(-0.5 * r * r, axis=-1), dtype=np.float64)
+lo = np.array([-0.5, -0.05, 0.01, 0.0, 2.0, 0.0, 0.0, -0.01])
+hi = np.array([ 0.5,  0.05, 0.50, 0.9, 50., 1.0, 1.0,  0.01])
 
-sampler = emcee.EnsembleSampler(n_walkers, 8, log_prob_all, vectorize=True)
+def log_prob_batch(theta):                        # (n_walkers/2, 8) from emcee
+    lp = np.array(loglike_c(mx.array(theta.astype(np.float32))),
+                  dtype=np.float64)
+    bad = np.any((theta < lo) | (theta > hi), axis=1)
+    lp[bad] = -np.inf                             # emcee treats -inf as reject
+    return lp
+
+sampler = emcee.EnsembleSampler(n_walkers, 8, log_prob_batch, vectorize=True)
 ```
 
-One GPU dispatch per ensemble move. Without `vectorize=True`, emcee
-calls the model per walker and you pay the 650× penalty.
+Three things this recipe gets right that a minimal one silently gets
+wrong:
+
+1. **Priors are mandatory.** MetalPlanet clamps every numerical hazard,
+   so unphysical proposals (negative r, q1 outside [0,1], |b| > a)
+   return ordinary *finite* log-likelihoods — without the bounds term
+   the chain wanders into flat unbounded directions and mirror modes
+   (the flux depends on r²-like combinations) and samples an improper
+   posterior with no error message. anvil's ParamSpec transforms impose
+   these bounds for you; raw emcee does not.
+2. **`mx.compile` the likelihood.** The advertised throughputs come
+   from compiled graphs; the same likelihood measured eager runs ~2×
+   slower at 1024×65k (12.97 vs 6.32 ms) because each eager elementwise
+   op streams a full-size temporary that compile fuses away.
+3. **Use `ChunkedGaussianLogLike`, not a bare `mx.sum`.** A single
+   fp32 sum over ≫65k points accumulates rounding toward the ~1-unit
+   Metropolis decision scale; the chunked tree is the repo's
+   conditioning answer and accepts this exact `model_fn(v, x)`
+   contract. (Casting the finished fp32 sum to float64 recovers
+   nothing.)
 
 ### Custom Metropolis / anything else
 
 Same principle: propose for all chains, stack into (n_chains, ndim),
-one model call, vectorized accept/reject. If your sampler framework
-cannot batch, run more chains until it can — parallel chains are free
-throughput on the GPU.
+one likelihood call, vectorized accept/reject. Adding chains is close
+to free **only while the GPU is unsaturated and within memory** — below
+~10^6 total points per dispatch, extra chains ride along at the
+dispatch floor; beyond saturation, wall time grows linearly with
+chains like anywhere else.
 
 ## Gradients: free when unused, cheap when used
 
-There is no "gradient overhead" to switch off. MLX is lazy: the
-backward pass only exists when a sampler calls `mx.grad`/`mx.vjp`, and
-the forward keeps no tape (the VJP recomputes). Every forward-only
-sampler (Metropolis, stretch, emcee) automatically gets the pure
-forward kernel — 17.5 ms at 1024×65k. Gradient samplers (ChEES-HMC)
-pay 52.5 ms for value+gradient, ~3× a forward and 519× cheaper than
-reverse-mode autodiff.
+There is no gradient overhead to switch off. MLX autodiff is
+transformation-based: the backward computation exists only when a
+sampler applies `mx.grad`/`mx.vjp`, and MetalPlanet's VJPs recompute
+forward-style rather than storing a tape, so plain forward calls carry
+nothing extra. Forward-only samplers (Metropolis, stretch, emcee) get
+the pure forward kernel — 17.5 ms at 1024×65k (`examples/bench_vjp.py`).
+Gradient samplers (ChEES-HMC) pay 52.5 ms for value+gradient — ~3× a
+forward, 519× cheaper than reverse-mode autodiff.
 
 ## Practical limits and conditioning
 
-- **Memory**: a batch materializes a few (n_chains × m) fp32 arrays.
-  The anvil engine chunks the data axis at 65,536 points; do the same
-  if n_chains × m approaches ~10^9 (the kernel itself holds everything
-  in registers, so pressure comes only from inputs/outputs).
-- **Long baselines in fp32**: raw absolute times lose the phase wrap
-  after ~1–2 orbits (measured: 1.2e-3 flux error at 1,000 orbits). Use
-  `epoch_center_times` (float64 host preprocessing → per-orbit residual
-  + orbit number) as the anvil path does; then fp32 is good to the
-  ~1e-6 flux level (e ≤ 0.999 with the Cartesian separation).
+- **Memory, forward**: the fused kernel keeps intermediates in
+  registers; a forward batch materializes only inputs and the output
+  (~12 B per point).
+- **Memory, gradients**: the analytic VJP kernel writes seven full
+  (n_chains × m) per-point gradient grids plus reads the cotangent
+  (~32 B per point transiently) before reducing. Budget gradient
+  batches accordingly: at n×m = 10^9 that is ~28 GB of transients —
+  chunk the data axis long before that (anvil's 65,536-point chunking
+  handles this automatically, though its primary purpose is the fp32
+  summation control described above).
+- **Long baselines in fp32**: raw absolute times lose the phase wrap.
+  Measured through the frontend (`verify_doc_claims.py`, P = 10 d,
+  r = 0.1 circular): max flux error 2×10⁻⁷ after 1 orbit, 1.1×10⁻⁵
+  after 100, 1.7×10⁻⁴ after 1,000. Use `epoch_center_times` (float64
+  host preprocessing → per-orbit residual + orbit number) as the anvil
+  path does; the circular fp32 path is then good to ~10⁻⁷-flux, and
+  the frontend's *eccentric* path (Cartesian separation) to the
+  ~10⁻⁶-flux level for e ≤ 0.999.
 - **Frontend note**: the batman-style `TransitModel.light_curve(params)`
   is deliberately a one-parameter-set API (batman parity) — fine for
-  plotting and single evaluations, wrong for a sampler loop. Samplers
-  should use `make_quad_transit_flux` (times + parameters) or the
-  array-level `flux_dev`/`flux_dev_metal` (separations + parameters).
+  plotting and single evaluations, wrong as a sampler's inner loop.
+  Samplers should use `make_quad_transit_flux` (times + parameters) or
+  the array-level `flux_dev`/`flux_dev_metal` (separations +
+  parameters).
+
+## Why GPU-sampler + GPU-model is the strategic pairing
+
+Of the four possible CPU/GPU splits between sampler and model, running
+both on the GPU (anvil + MetalPlanet) is the only one with no
+per-iteration device crossing, no Python in the hot loop, and access to
+the 52.5 ms analytic gradients — while the CPU concurrently owns the
+float64 work (preprocessing, re-anchoring, diagnostics) that Metal
+cannot do. The measured outcome on the reference problem: ~13 ESS/s
+for GPU-HMC vs ~2 ESS/s for the conventional CPU-sampler + CPU-model
+stack.

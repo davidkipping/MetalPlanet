@@ -91,13 +91,11 @@ venv stores absolute paths.
 
 ## The batching rule (read this before writing a sampler)
 
-A GPU dispatch has a fixed ~0.2–0.7 ms floor; throughput comes from
-total points per call, and (parameter sets) x (points per curve) counts
-equally on both axes. Evaluate ALL walkers/chains in ONE call: 10,000
-parameter sets x 1,000 points costs 2.9 ms batched vs 1.9 s looped
-(650x). anvil does this natively; emcee needs `vectorize=True`; the
-batman-style `TransitModel.light_curve` is a one-curve API and must not
-be the inner loop of a sampler. Full guidance with code:
+Batch every walker/chain into one model call — a Python loop over
+parameter sets pays the GPU dispatch floor per iteration and is three
+orders of magnitude slower than the identical work batched. The full
+rule, working sampler recipes (anvil, emcee, custom), the priors and
+`mx.compile` pitfalls, and reproducible measurements live in
 [docs/sampler-integration.md](docs/sampler-integration.md).
 
 ## Performance (M2 Max, fp32, 1024 chains x 65536 points, compiled)
@@ -115,7 +113,7 @@ The MLX graph is memory-bandwidth-bound (~KB of intermediate traffic per
 point); the hand-fused kernels (`metal.py`) keep the whole model — the
 epoch-centered orbit AND the ALFM19 photometric core — in registers
 (~12 B/pt of traffic): 28x the forward, 519x autodiff's value+grad,
-~5.7 G pts/s in population batches (55,000 curves/s at npv x 100k for
+~5.5 G pts/s in population batches (55,000 curves/s at npv x 100k for
 any npv 64-4096; no unified-memory cliff). End-to-end: the full-scale
 1024-chain ChEES-HMC injection-recovery runs in 143 s at 13.1 ESS/s —
 1.8x the stretch move on the same core, zero divergences. Kernel parity
