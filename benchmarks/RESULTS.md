@@ -9,13 +9,13 @@ Scenario: quadratic limb-darkened primary transit (P=3.456 d, a/R*=8.8, b=0.45, 
 
 | code | max |err| | median |err| |
 |---|---:|---:|
-| metalplanet fp64 | 3.33e-16 | 0.00e+00 |
+| metalplanet fp64 | 2.22e-16 | 0.00e+00 |
 | exoplanet-core | 3.33e-16 | 0.00e+00 |
 | jaxoplanet (order=50) | 1.75e-12 | 0.00e+00 |
 | jaxoplanet (order=10) | 4.58e-09 | 0.00e+00 |
 | batman | 6.04e-09 | 2.10e-10 |
 | pytransit (exact) | 4.04e-08 | 7.96e-10 |
-| metalplanet fp32(GPU) | 1.38e-07 | 3.74e-09 |
+| metalplanet fp32(GPU) | 1.75e-07 | 5.24e-09 |
 | pytransit (interp) | 6.26e-06 | 1.17e-07 |
 
 `ellc` excluded: its PyPI wheel ships an x86_64-only binary (incompatible with arm64) and source builds need gfortran.
@@ -25,36 +25,36 @@ Scenario: quadratic limb-darkened primary transit (P=3.456 d, a/R*=8.8, b=0.45, 
 
 | code (threads) | N=1,000 | N=10,000 | N=100,000 | N=1,000,000 | N=10,000,000 |
 |---|---:|---:|---:|---:|---:|
-| batman (1) | 0.02 ms | 0.20 ms | 1.96 ms | 19.86 ms | 197.19 ms |
-| exoplanet (1) | 0.04 ms | 0.29 ms | 2.86 ms | 29.87 ms | 323.22 ms |
-| jaxoplanet (all) | 0.09 ms | 0.57 ms | 2.15 ms | 20.23 ms | 176.54 ms |
-| metalplanet_fp32 (all) | 0.68 ms | 0.77 ms | 0.79 ms | 1.40 ms | 9.14 ms |
-| metalplanet_fp64 (all) | 0.45 ms | 1.62 ms | 13.95 ms | 131.73 ms | 1,303.85 ms |
-| pytransit (1) | 0.04 ms | 0.37 ms | 3.66 ms | 36.94 ms | 368.45 ms |
-| pytransit (4) | 0.04 ms | 0.37 ms | 3.63 ms | 36.62 ms | 367.74 ms |
-| pytransit (8) | 0.04 ms | 0.38 ms | 3.62 ms | 36.85 ms | 368.56 ms |
-| pytransit (12) | 0.04 ms | 0.37 ms | 3.70 ms | 36.77 ms | 372.01 ms |
+| batman (1) | 0.02 ms | 0.20 ms | 1.92 ms | 18.91 ms | 193.80 ms |
+| exoplanet (1) | 0.04 ms | 0.29 ms | 2.82 ms | 29.79 ms | 318.36 ms |
+| jaxoplanet (all) | 0.13 ms | 0.56 ms | 2.10 ms | 20.19 ms | 182.95 ms |
+| metalplanet_fp32 (all) | 0.24 ms | 0.70 ms | 0.74 ms | 1.43 ms | 9.27 ms |
+| metalplanet_fp64 (all) | 0.48 ms | 1.55 ms | 14.64 ms | 132.65 ms | 1,317.12 ms |
+| pytransit (1) | 0.04 ms | 0.36 ms | 3.55 ms | 35.72 ms | 360.43 ms |
+| pytransit (4) | 0.04 ms | 0.36 ms | 3.55 ms | 35.71 ms | 359.28 ms |
+| pytransit (8) | 0.04 ms | 0.36 ms | 3.59 ms | 35.76 ms | 358.83 ms |
+| pytransit (12) | 0.04 ms | 0.36 ms | 3.54 ms | 35.81 ms | 359.70 ms |
 
 ## Native batch: 512 parameter sets x 100,000 points
 
 | code | wall | curves/s | notes |
 |---|---:|---:|---|
-| pytransit | 0.250 s | 2,048 | native parameter arrays (numba) |
-| jaxoplanet | 0.916 s | 559 | jax.vmap, CPU x64 |
-| batman | 1.815 s | 282 | python loop (no native batch) |
-| exoplanet | 1.553 s | 330 | python loop (no native batch) |
-| metalplanet_gpu | 0.010 s | 53,622 | fp32 GPU, one broadcast graph |
+| metalplanet_gpu | 0.010 s | 53,590 | fp32 GPU, one broadcast graph |
+| pytransit | 0.236 s | 2,174 | native parameter arrays (numba) |
+| jaxoplanet | 0.903 s | 567 | jax.vmap, CPU x64 |
+| batman | 1.787 s | 287 | python loop (no native batch) |
+| exoplanet | 1.498 s | 342 | python loop (no native batch) |
 
 ## Batch-size scaling (npv x 100,000 points): GPU vs its strongest CPU rival
 
 | npv | MetalPlanet GPU [curves/s] | PyTransit 12-core [curves/s] |
 |---:|---:|---:|
-| 64 | 35,013 | 1,965 |
-| 256 | 51,927 | 2,077 |
-| 512 | 53,590 | 2,139 |
-| 1024 | 54,726 | 1,957 |
-| 2048 | 55,083 | 1,972 |
-| 4096 | 55,274 | 1,989 |
+| 64 | 40,638 | 2,037 |
+| 256 | 52,037 | 2,168 |
+| 512 | 53,592 | 2,149 |
+| 1024 | 54,757 | 1,986 |
+| 2048 | 55,126 | 2,004 |
+| 4096 | 55,268 | 2,024 |
 
 With the fused model-level Metal kernel (orbit + photometry in one register-resident pass, ~12 B/pt of memory traffic) the GPU streams ~55,000 curves/s flat to npv = 4096 with no memory cliff. PyTransit's numba batch streams ~1,950 curves/s at every size on 12 cores.
 

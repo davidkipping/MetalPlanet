@@ -1,13 +1,13 @@
 [
  {
   "code": "metalplanet fp64",
-  "max_err": 3.3306690738754696e-16,
+  "max_err": 2.220446049250313e-16,
   "median_err": 0.0
  },
  {
   "code": "metalplanet fp32(GPU)",
-  "max_err": 1.3776893137418256e-07,
-  "median_err": 3.737021359029313e-09
+  "max_err": 1.7507691296714256e-07,
+  "median_err": 5.2401073480368154e-09
  },
  {
   "code": "batman",

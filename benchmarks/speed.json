@@ -1,11 +1,101 @@
 [
  {
+  "code": "metalplanet_fp32",
+  "mode": "single",
+  "n": 1000,
+  "threads": 0,
+  "median_s": 0.00023691600654274225,
+  "min_s": 0.00021920801373198628,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp32",
+  "mode": "single",
+  "n": 10000,
+  "threads": 0,
+  "median_s": 0.0007036669994704425,
+  "min_s": 0.0002209999947808683,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp32",
+  "mode": "single",
+  "n": 100000,
+  "threads": 0,
+  "median_s": 0.0007370830280706286,
+  "min_s": 0.0007049160194583237,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp32",
+  "mode": "single",
+  "n": 1000000,
+  "threads": 0,
+  "median_s": 0.0014272090047597885,
+  "min_s": 0.0013482089852914214,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp32",
+  "mode": "single",
+  "n": 10000000,
+  "threads": 0,
+  "median_s": 0.009271999995689839,
+  "min_s": 0.00838316697627306,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp64",
+  "mode": "single",
+  "n": 1000,
+  "threads": 0,
+  "median_s": 0.0004801659961231053,
+  "min_s": 0.0004309579962864518,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp64",
+  "mode": "single",
+  "n": 10000,
+  "threads": 0,
+  "median_s": 0.0015547499642707407,
+  "min_s": 0.001525666972156614,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp64",
+  "mode": "single",
+  "n": 100000,
+  "threads": 0,
+  "median_s": 0.014639665954746306,
+  "min_s": 0.01427170803071931,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp64",
+  "mode": "single",
+  "n": 1000000,
+  "threads": 0,
+  "median_s": 0.13264754152623937,
+  "min_s": 0.12876549997599795,
+  "reps": 12
+ },
+ {
+  "code": "metalplanet_fp64",
+  "mode": "single",
+  "n": 10000000,
+  "threads": 0,
+  "median_s": 1.3171224169782363,
+  "min_s": 1.3114604580332525,
+  "reps": 3
+ },
+ {
   "code": "batman",
   "mode": "single",
   "n": 1000,
   "threads": 1,
-  "median_s": 2.1374959032982588e-05,
-  "min_s": 1.9875005818903446e-05,
+  "median_s": 2.037500962615013e-05,
+  "min_s": 1.9916973542422056e-05,
   "reps": 15
  },
  {
@@ -13,8 +103,8 @@
   "mode": "single",
   "n": 10000,
   "threads": 1,
-  "median_s": 0.00019995798356831074,
-  "min_s": 0.0001876670285128057,
+  "median_s": 0.00019658298697322607,
+  "min_s": 0.00018691702280193567,
   "reps": 15
  },
  {
@@ -22,8 +112,8 @@
   "mode": "single",
   "n": 100000,
   "threads": 1,
-  "median_s": 0.0019597079954110086,
-  "min_s": 0.0018988330266438425,
+  "median_s": 0.001915499975439161,
+  "min_s": 0.0018681249930523336,
   "reps": 15
  },
  {
@@ -31,8 +121,8 @@
   "mode": "single",
   "n": 1000000,
   "threads": 1,
-  "median_s": 0.01985500002047047,
-  "min_s": 0.01947216596454382,
+  "median_s": 0.018912292027380317,
+  "min_s": 0.018835750001017004,
   "reps": 15
  },
  {
@@ -40,8 +130,8 @@
   "mode": "single",
   "n": 10000000,
   "threads": 1,
-  "median_s": 0.19718768750317395,
-  "min_s": 0.19583691703155637,
+  "median_s": 0.19379727100022137,
+  "min_s": 0.19025170797249302,
   "reps": 8
  },
  {
@@ -50,7 +140,7 @@
   "n": 1000,
   "threads": 1,
   "median_s": 3.875000402331352e-05,
-  "min_s": 3.8457976188510656e-05,
+  "min_s": 3.837497206404805e-05,
   "reps": 15
  },
  {
@@ -58,7 +148,142 @@
   "mode": "single",
   "n": 10000,
   "threads": 1,
-  "median_s": 0.0003675839980132878,
+  "median_s": 0.00036154198460280895,
+  "min_s": 0.0003570830449461937,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 100000,
+  "threads": 1,
+  "median_s": 0.003547416999936104,
+  "min_s": 0.0035394169972278178,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 1000000,
+  "threads": 1,
+  "median_s": 0.03572450001956895,
+  "min_s": 0.03557887498755008,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 10000000,
+  "threads": 1,
+  "median_s": 0.3604272080119699,
+  "min_s": 0.35820254194550216,
+  "reps": 5
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 1000,
+  "threads": 4,
+  "median_s": 3.875000402331352e-05,
+  "min_s": 3.8416008464992046e-05,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 10000,
+  "threads": 4,
+  "median_s": 0.00035987503360956907,
+  "min_s": 0.0003563750069588423,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 100000,
+  "threads": 4,
+  "median_s": 0.0035537920193746686,
+  "min_s": 0.003533290990162641,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 1000000,
+  "threads": 4,
+  "median_s": 0.035713458026293665,
+  "min_s": 0.035653791041113436,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 10000000,
+  "threads": 4,
+  "median_s": 0.35927670798264444,
+  "min_s": 0.3586585000157356,
+  "reps": 5
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 1000,
+  "threads": 8,
+  "median_s": 3.866699989885092e-05,
+  "min_s": 3.829196793958545e-05,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 10000,
+  "threads": 8,
+  "median_s": 0.00035779201425611973,
+  "min_s": 0.0003566250088624656,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 100000,
+  "threads": 8,
+  "median_s": 0.003591832995880395,
+  "min_s": 0.0035609579645097256,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 1000000,
+  "threads": 8,
+  "median_s": 0.035757416975684464,
+  "min_s": 0.035609165963251144,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 10000000,
+  "threads": 8,
+  "median_s": 0.3588258749805391,
+  "min_s": 0.3584273750311695,
+  "reps": 5
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 1000,
+  "threads": 12,
+  "median_s": 3.866601036861539e-05,
+  "min_s": 3.837497206404805e-05,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 10000,
+  "threads": 12,
+  "median_s": 0.00035987497540190816,
   "min_s": 0.00035612500505521894,
   "reps": 15
  },
@@ -66,180 +291,144 @@
   "code": "pytransit",
   "mode": "single",
   "n": 100000,
-  "threads": 1,
-  "median_s": 0.003661207971163094,
-  "min_s": 0.003560208948329091,
+  "threads": 12,
+  "median_s": 0.0035406670067459345,
+  "min_s": 0.0035361250047571957,
   "reps": 15
  },
  {
   "code": "pytransit",
   "mode": "single",
   "n": 1000000,
-  "threads": 1,
-  "median_s": 0.03694441699190065,
-  "min_s": 0.03655395802343264,
+  "threads": 12,
+  "median_s": 0.03580516699003056,
+  "min_s": 0.035640499962028116,
   "reps": 15
  },
  {
   "code": "pytransit",
   "mode": "single",
   "n": 10000000,
-  "threads": 1,
-  "median_s": 0.36845074995653704,
-  "min_s": 0.3667124999919906,
+  "threads": 12,
+  "median_s": 0.35969929199200124,
+  "min_s": 0.3576735000242479,
   "reps": 5
  },
  {
-  "code": "pytransit",
+  "code": "exoplanet",
   "mode": "single",
   "n": 1000,
-  "threads": 4,
-  "median_s": 3.870902583003044e-05,
-  "min_s": 3.825000021606684e-05,
+  "threads": 1,
+  "median_s": 3.7207966670393944e-05,
+  "min_s": 3.5584031138569117e-05,
   "reps": 15
  },
  {
-  "code": "pytransit",
+  "code": "exoplanet",
   "mode": "single",
   "n": 10000,
-  "threads": 4,
-  "median_s": 0.0003690829616971314,
-  "min_s": 0.0003562920028343797,
+  "threads": 1,
+  "median_s": 0.00028841698076575994,
+  "min_s": 0.0002727920073084533,
   "reps": 15
  },
  {
-  "code": "pytransit",
+  "code": "exoplanet",
   "mode": "single",
   "n": 100000,
-  "threads": 4,
-  "median_s": 0.0036308750277385116,
-  "min_s": 0.00353879202157259,
+  "threads": 1,
+  "median_s": 0.002816124993842095,
+  "min_s": 0.0027734579634852707,
   "reps": 15
  },
  {
-  "code": "pytransit",
+  "code": "exoplanet",
   "mode": "single",
   "n": 1000000,
-  "threads": 4,
-  "median_s": 0.03662370902020484,
-  "min_s": 0.03599616698920727,
+  "threads": 1,
+  "median_s": 0.029787959007080644,
+  "min_s": 0.029458833043463528,
   "reps": 15
  },
  {
-  "code": "pytransit",
+  "code": "exoplanet",
   "mode": "single",
   "n": 10000000,
-  "threads": 4,
-  "median_s": 0.36774024995975196,
-  "min_s": 0.3658360000117682,
+  "threads": 1,
+  "median_s": 0.3183584999642335,
+  "min_s": 0.3178127089631744,
   "reps": 5
  },
  {
-  "code": "pytransit",
+  "code": "jaxoplanet",
   "mode": "single",
   "n": 1000,
-  "threads": 8,
-  "median_s": 4.3791020289063454e-05,
-  "min_s": 3.84590239264071e-05,
+  "threads": 0,
+  "median_s": 0.00012812495697289705,
+  "min_s": 0.00010066700633615255,
   "reps": 15
  },
  {
-  "code": "pytransit",
+  "code": "jaxoplanet",
   "mode": "single",
   "n": 10000,
-  "threads": 8,
-  "median_s": 0.00038158398820087314,
-  "min_s": 0.00035737501457333565,
+  "threads": 0,
+  "median_s": 0.0005634169792756438,
+  "min_s": 0.0005179170402698219,
   "reps": 15
  },
  {
-  "code": "pytransit",
+  "code": "jaxoplanet",
   "mode": "single",
   "n": 100000,
-  "threads": 8,
-  "median_s": 0.0036205839714966714,
-  "min_s": 0.0035275829723104835,
+  "threads": 0,
+  "median_s": 0.002101333055179566,
+  "min_s": 0.001988167001400143,
   "reps": 15
  },
  {
-  "code": "pytransit",
+  "code": "jaxoplanet",
   "mode": "single",
   "n": 1000000,
-  "threads": 8,
-  "median_s": 0.036852208024356514,
-  "min_s": 0.0364815829670988,
+  "threads": 0,
+  "median_s": 0.02019375003874302,
+  "min_s": 0.01951645902590826,
   "reps": 15
  },
  {
-  "code": "pytransit",
+  "code": "jaxoplanet",
   "mode": "single",
   "n": 10000000,
-  "threads": 8,
-  "median_s": 0.3685602499754168,
-  "min_s": 0.36636549996910617,
-  "reps": 5
+  "threads": 0,
+  "median_s": 0.18294845800846815,
+  "min_s": 0.18094366701552644,
+  "reps": 9
  },
  {
-  "code": "pytransit",
-  "mode": "single",
-  "n": 1000,
-  "threads": 12,
-  "median_s": 3.866699989885092e-05,
-  "min_s": 3.8375030271708965e-05,
+  "code": "metalplanet_gpu",
+  "mode": "batch",
+  "n": 0,
+  "threads": 0,
+  "median_s": 0.009553999989293516,
+  "min_s": 0.009531957970466465,
   "reps": 15
- },
- {
-  "code": "pytransit",
-  "mode": "single",
-  "n": 10000,
-  "threads": 12,
-  "median_s": 0.00037420797161757946,
-  "min_s": 0.0003569999826140702,
-  "reps": 15
- },
- {
-  "code": "pytransit",
-  "mode": "single",
-  "n": 100000,
-  "threads": 12,
-  "median_s": 0.003701290988828987,
-  "min_s": 0.003542874997947365,
-  "reps": 15
- },
- {
-  "code": "pytransit",
-  "mode": "single",
-  "n": 1000000,
-  "threads": 12,
-  "median_s": 0.03676729102153331,
-  "min_s": 0.03630858298856765,
-  "reps": 15
- },
- {
-  "code": "pytransit",
-  "mode": "single",
-  "n": 10000000,
-  "threads": 12,
-  "median_s": 0.37200966698583215,
-  "min_s": 0.3700014580390416,
-  "reps": 5
  },
  {
   "code": "pytransit",
   "mode": "batch",
   "n": 0,
   "threads": 0,
-  "median_s": 0.25004302099114284,
-  "min_s": 0.23807975003728643,
-  "reps": 6
+  "median_s": 0.23554087500087917,
+  "min_s": 0.23101245803991333,
+  "reps": 7
  },
  {
   "code": "jaxoplanet",
   "mode": "batch",
   "n": 0,
   "threads": 0,
-  "median_s": 0.9162858329946175,
-  "min_s": 0.9077660419861786,
+  "median_s": 0.9026434579864144,
+  "min_s": 0.8967094579711556,
   "reps": 3
  },
  {
@@ -247,8 +436,8 @@
   "mode": "batch",
   "n": 0,
   "threads": 0,
-  "median_s": 1.8148888330324553,
-  "min_s": 1.8132853750139475,
+  "median_s": 1.7870101669686846,
+  "min_s": 1.7779744159779511,
   "reps": 3
  },
  {
@@ -256,197 +445,8 @@
   "mode": "batch",
   "n": 0,
   "threads": 0,
-  "median_s": 1.5527714590425603,
-  "min_s": 1.5467430000426248,
+  "median_s": 1.4980967089650221,
+  "min_s": 1.4906770000234246,
   "reps": 3
- },
- {
-  "code": "metalplanet_fp64",
-  "mode": "single",
-  "n": 1000,
-  "threads": 0,
-  "median_s": 0.0004505419638007879,
-  "min_s": 0.00041145802242681384,
-  "reps": 15
- },
- {
-  "code": "metalplanet_fp64",
-  "mode": "single",
-  "n": 10000,
-  "threads": 0,
-  "median_s": 0.0016203330014832318,
-  "min_s": 0.0015733750187791884,
-  "reps": 15
- },
- {
-  "code": "metalplanet_fp64",
-  "mode": "single",
-  "n": 100000,
-  "threads": 0,
-  "median_s": 0.013946916966233402,
-  "min_s": 0.013719625014346093,
-  "reps": 15
- },
- {
-  "code": "metalplanet_fp64",
-  "mode": "single",
-  "n": 1000000,
-  "threads": 0,
-  "median_s": 0.131727707979735,
-  "min_s": 0.13062233303207904,
-  "reps": 12
- },
- {
-  "code": "metalplanet_fp64",
-  "mode": "single",
-  "n": 10000000,
-  "threads": 0,
-  "median_s": 1.3038533750222996,
-  "min_s": 1.3015818750136532,
-  "reps": 3
- },
- {
-  "code": "exoplanet",
-  "mode": "single",
-  "n": 1000,
-  "threads": 1,
-  "median_s": 3.94159578718245e-05,
-  "min_s": 3.570795524865389e-05,
-  "reps": 15
- },
- {
-  "code": "exoplanet",
-  "mode": "single",
-  "n": 10000,
-  "threads": 1,
-  "median_s": 0.00029441603692248464,
-  "min_s": 0.000273333047516644,
-  "reps": 15
- },
- {
-  "code": "exoplanet",
-  "mode": "single",
-  "n": 100000,
-  "threads": 1,
-  "median_s": 0.0028590839938260615,
-  "min_s": 0.0027619170141406357,
-  "reps": 15
- },
- {
-  "code": "exoplanet",
-  "mode": "single",
-  "n": 1000000,
-  "threads": 1,
-  "median_s": 0.029871959006413817,
-  "min_s": 0.029695875011384487,
-  "reps": 15
- },
- {
-  "code": "exoplanet",
-  "mode": "single",
-  "n": 10000000,
-  "threads": 1,
-  "median_s": 0.32322033401578665,
-  "min_s": 0.31830012501450256,
-  "reps": 5
- },
- {
-  "code": "jaxoplanet",
-  "mode": "single",
-  "n": 1000,
-  "threads": 0,
-  "median_s": 9.012495866045356e-05,
-  "min_s": 7.795903366059065e-05,
-  "reps": 15
- },
- {
-  "code": "jaxoplanet",
-  "mode": "single",
-  "n": 10000,
-  "threads": 0,
-  "median_s": 0.0005739170010201633,
-  "min_s": 0.0005203330074436963,
-  "reps": 15
- },
- {
-  "code": "jaxoplanet",
-  "mode": "single",
-  "n": 100000,
-  "threads": 0,
-  "median_s": 0.0021531250094994903,
-  "min_s": 0.0020249579683877528,
-  "reps": 15
- },
- {
-  "code": "jaxoplanet",
-  "mode": "single",
-  "n": 1000000,
-  "threads": 0,
-  "median_s": 0.020234375027939677,
-  "min_s": 0.019615666999015957,
-  "reps": 15
- },
- {
-  "code": "jaxoplanet",
-  "mode": "single",
-  "n": 10000000,
-  "threads": 0,
-  "median_s": 0.17654412501724437,
-  "min_s": 0.17324391601141542,
-  "reps": 9
- },
- {
-  "code": "metalplanet_fp32",
-  "mode": "single",
-  "n": 1000,
-  "threads": 0,
-  "median_s": 0.0006810409831814468,
-  "min_s": 0.00020937505178153515,
-  "reps": 15
- },
- {
-  "code": "metalplanet_fp32",
-  "mode": "single",
-  "n": 10000,
-  "threads": 0,
-  "median_s": 0.0007664590375497937,
-  "min_s": 0.0007234169752337039,
-  "reps": 15
- },
- {
-  "code": "metalplanet_fp32",
-  "mode": "single",
-  "n": 100000,
-  "threads": 0,
-  "median_s": 0.0007864999934099615,
-  "min_s": 0.0006860420107841492,
-  "reps": 15
- },
- {
-  "code": "metalplanet_fp32",
-  "mode": "single",
-  "n": 1000000,
-  "threads": 0,
-  "median_s": 0.0014035410131327808,
-  "min_s": 0.0010408330126665533,
-  "reps": 15
- },
- {
-  "code": "metalplanet_fp32",
-  "mode": "single",
-  "n": 10000000,
-  "threads": 0,
-  "median_s": 0.00913754099747166,
-  "min_s": 0.008814707980491221,
-  "reps": 15
- },
- {
-  "code": "metalplanet_gpu",
-  "mode": "batch",
-  "n": 0,
-  "threads": 0,
-  "median_s": 0.00954829202964902,
-  "min_s": 0.009476583043579012,
-  "reps": 15
  }
 ]
