@@ -1,0 +1,72 @@
+# Eccentric fused-kernel design notes
+
+Findings from a three-agent verification pass (2026-09-06: symbolic/
+numerical math check, Metal micro-benchmarks, fp32 stability mapping)
+that inform the future eccentric model-level kernel. The graph path
+already uses the Cartesian tail (kepler.py); this file preserves the
+verified pieces the kernel will need.
+
+## Separation from eccentric anomaly (implemented in the graph path)
+
+With E from the Markley solve, beta = sqrt(1-e^2):
+
+    X = a (cosE - e)          # orbital-plane Cartesians = (r cos f, r sin f)
+    Y = a beta sinE
+    u = X cos w - Y sin w     # = r cos(w+f)
+    v = X sin w + Y cos w     # = r sin(w+f); FRONT TEST IS v > 0 (unprojected)
+    z = sqrt(u^2 + (v cos i)^2)
+
+Exactly equivalent to the conic form (proven symbolically; 4.5e-25
+residual at 40 digits) and strictly better conditioned: no
+1 - sin^2(w+f) sin^2 i cancellation near transit (was a ~1e-6 fp32 flux
+floor even at e = 0), no (1 + e cos f) collapse at near-apastron
+transits (was up to 6e-3 flux error at e ~ 0.99, a = 300; Cartesian
+stays ~6e-7). fp32-trustworthy at the 1e-6 flux level for e <= 0.999.
+In a kernel, all six rotation coefficients hoist per chain:
+x = c1 cosE + c2 sinE + c0, y' = c3 cosE + c4 sinE + c5 (cos i folded
+into c3..c5; sign of y'/ci preserved for the front test).
+
+## Verified backward-pass formulas (checked to ~1e-30 vs FD)
+
+Save sinE, cosE, beta, X, Y, u, v, z from the forward; ct = dL/dz;
+zinv = 1/max(z, tiny) (the forward needs no clamp; only this divide
+does). D = 1 - e cosE >= 1 - e.
+
+    g_u  = ct * u * zinv
+    g_v  = ct * v * ci^2 * zinv
+    g_X  =  g_u cw + g_v sw
+    g_Y  = -g_u sw + g_v cw
+    dzdE = a (-g_X sinE + g_Y beta cosE)
+    dz/dM = dzdE / D
+    dz/de = dzdE sinE / D - a g_X - (a e sinE / beta) g_Y
+    dz/da = ct * z / a                    # exact
+    dz/dw = -ct * u v si^2 * zinv
+    dz/di = -ct * v^2 ci si * zinv
+
+E-level implicit rule (kepler_E_sincos.vjp, already implemented):
+dE = (dM + sinE de)/D.
+
+## Measured kernel economics (M2 Max, toy kernels mirroring metal.py)
+
+- Cartesian vs true-anomaly tail: +13.3-13.7% model throughput at a
+  realistic 5% in-transit mix; +8-10% at 50%; +15.8% orbit-only.
+  The delta is mix-independent (every thread pays the tail).
+- Divide throughput is ~44x a multiply under safe math (fast::divide
+  ~9x); precise::sin/cos ~84x; precise::powr ~220x.
+- THE hotspot is the Markley starter's cbrt via precise::powr (~20% of
+  orbit time): a cheap cbrt (bit-trick + Newton) buys as much as the
+  tail switch itself. fast::divide is a second lever if accuracy
+  permits.
+- The Markley+one-refinement solve itself is fp32-robust: |dE| <=
+  4.1e-7 rad at e = 0.999 down to M = 1e-7 (the e->1, M->0 corner
+  lives in the tail choice, not the solve).
+- Long baselines: fp32 raw-time phase wrap costs 1.75e-7 rad/orbit —
+  crosses 1e-6 flux at ~1-2 orbits. The eccentric kernel MUST take
+  epoch-centered (dt, k) inputs like the circular v2 kernel does.
+- Kernel VJP: match the circular kernel's pattern (per-point partial
+  arrays + mx.sum); the wrap term in dphi/dp_off analog is the
+  (-k - n) chain as in metal.py's model VJP.
+
+Agent scratch/verification scripts (session-local, not in repo) were
+validated against tests/test_kepler.py::TestCartesianTail, which pins
+the equivalence, the apastron fp32 bound, and both implicit VJPs.

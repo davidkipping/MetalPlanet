@@ -30,7 +30,7 @@ flux = m.light_curve(params)       # numpy array, batman-style
 
 Supported batman-isms: parameter updates between `light_curve` calls,
 `supersample_factor`/`exp_time` (same endpoint-inclusive convention),
-eccentric orbits (fixed-iteration differentiable Kepler solver),
+eccentric orbits (non-iterative Markley solver, differentiable),
 `transittype="secondary"` with `params.fp`. Tested against batman itself
 across orbital configurations — agreement is at batman's own ~2e-8
 accuracy floor (its quadratic model uses Hastings polynomial E/K; the
@@ -68,7 +68,7 @@ is closed-form).
 | `flux.py`     | flux assembly (Green's basis, quadratic LD) |
 | `vjp.py`      | analytic custom VJP for the photometric core (MLX graph) |
 | `metal.py`    | hand-fused Metal kernels (forward + analytic VJP) — the fp32 GPU fast path |
-| `kepler.py`   | Markley non-iterative Kepler solver with implicit-gradient custom VJP |
+| `kepler.py`   | Markley non-iterative Kepler solver; Cartesian-from-E separation with E-level implicit VJP |
 | `orbit.py`    | epoch-centered circular orbit (float32-safe sampling path) |
 | `trig.py`     | accurate fp64 sin/cos (MLX's are float32-accurate) |
 | `greens.py`   | limb-darkening → Green's-basis transform (any order, host-side) |
@@ -128,6 +128,17 @@ silently use the graph core.
 * MLX 0.32's fp64 `sin`/`cos` (and `exp`) are only float32-accurate;
   `trig.sincos` provides Cody–Waite-reduced fp64 versions for the
   verification paths. `sqrt`, `arccos`, `arctan2` are true fp64.
-* Fixed iteration counts everywhere (cel: 10/12 for fp32/fp64; Kepler:
-  5 Halley steps) — no data-dependent control flow, so everything is
-  `mx.compile`-safe and batches cleanly.
+* The eccentric separation never computes the true anomaly: z comes
+  from the orbital-plane Cartesians X = a(cosE−e), Y = a√(1−e²) sinE
+  (rotated, projected). Exactly equivalent to the conic form and
+  strictly better conditioned — no near-transit or apastron
+  cancellations; fp32-trustworthy at the 1e-6 flux level to e ≤ 0.999.
+  See docs/eccentric-kernel-notes.md for the verified backward-pass
+  formulas and fused-kernel design findings.
+* MLX ops on pure-Python operands mint float32 scalars: when a
+  parameter may be a Python float, scalar branches must use `math.*`
+  or an fp64 path silently carries fp32-accurate constants.
+* Fixed iteration counts everywhere (cel: 10/12 for fp32/fp64;
+  Markley Kepler: starter + one fifth-order refinement) — no
+  data-dependent control flow, so everything is `mx.compile`-safe and
+  batches cleanly.
