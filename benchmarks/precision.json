@@ -1,0 +1,42 @@
+[
+ {
+  "code": "metalplanet fp64",
+  "max_err": 3.3306690738754696e-16,
+  "median_err": 0.0
+ },
+ {
+  "code": "metalplanet fp32(GPU)",
+  "max_err": 1.3776893137418256e-07,
+  "median_err": 3.737021359029313e-09
+ },
+ {
+  "code": "batman",
+  "max_err": 6.040715150312792e-09,
+  "median_err": 2.1029011865181246e-10
+ },
+ {
+  "code": "pytransit (exact)",
+  "max_err": 4.041781154207058e-08,
+  "median_err": 7.959762848841478e-10
+ },
+ {
+  "code": "pytransit (interp)",
+  "max_err": 6.2622466692197065e-06,
+  "median_err": 1.171353677387188e-07
+ },
+ {
+  "code": "exoplanet-core",
+  "max_err": 3.3306690738754696e-16,
+  "median_err": 0.0
+ },
+ {
+  "code": "jaxoplanet (order=10)",
+  "max_err": 4.577611290024208e-09,
+  "median_err": 0.0
+ },
+ {
+  "code": "jaxoplanet (order=50)",
+  "max_err": 1.7451595724082836e-12,
+  "median_err": 0.0
+ }
+]

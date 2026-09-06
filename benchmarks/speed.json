@@ -1,0 +1,452 @@
+[
+ {
+  "code": "batman",
+  "mode": "single",
+  "n": 1000,
+  "threads": 1,
+  "median_s": 2.1374959032982588e-05,
+  "min_s": 1.9875005818903446e-05,
+  "reps": 15
+ },
+ {
+  "code": "batman",
+  "mode": "single",
+  "n": 10000,
+  "threads": 1,
+  "median_s": 0.00019995798356831074,
+  "min_s": 0.0001876670285128057,
+  "reps": 15
+ },
+ {
+  "code": "batman",
+  "mode": "single",
+  "n": 100000,
+  "threads": 1,
+  "median_s": 0.0019597079954110086,
+  "min_s": 0.0018988330266438425,
+  "reps": 15
+ },
+ {
+  "code": "batman",
+  "mode": "single",
+  "n": 1000000,
+  "threads": 1,
+  "median_s": 0.01985500002047047,
+  "min_s": 0.01947216596454382,
+  "reps": 15
+ },
+ {
+  "code": "batman",
+  "mode": "single",
+  "n": 10000000,
+  "threads": 1,
+  "median_s": 0.19718768750317395,
+  "min_s": 0.19583691703155637,
+  "reps": 8
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 1000,
+  "threads": 1,
+  "median_s": 3.875000402331352e-05,
+  "min_s": 3.8457976188510656e-05,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 10000,
+  "threads": 1,
+  "median_s": 0.0003675839980132878,
+  "min_s": 0.00035612500505521894,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 100000,
+  "threads": 1,
+  "median_s": 0.003661207971163094,
+  "min_s": 0.003560208948329091,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 1000000,
+  "threads": 1,
+  "median_s": 0.03694441699190065,
+  "min_s": 0.03655395802343264,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 10000000,
+  "threads": 1,
+  "median_s": 0.36845074995653704,
+  "min_s": 0.3667124999919906,
+  "reps": 5
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 1000,
+  "threads": 4,
+  "median_s": 3.870902583003044e-05,
+  "min_s": 3.825000021606684e-05,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 10000,
+  "threads": 4,
+  "median_s": 0.0003690829616971314,
+  "min_s": 0.0003562920028343797,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 100000,
+  "threads": 4,
+  "median_s": 0.0036308750277385116,
+  "min_s": 0.00353879202157259,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 1000000,
+  "threads": 4,
+  "median_s": 0.03662370902020484,
+  "min_s": 0.03599616698920727,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 10000000,
+  "threads": 4,
+  "median_s": 0.36774024995975196,
+  "min_s": 0.3658360000117682,
+  "reps": 5
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 1000,
+  "threads": 8,
+  "median_s": 4.3791020289063454e-05,
+  "min_s": 3.84590239264071e-05,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 10000,
+  "threads": 8,
+  "median_s": 0.00038158398820087314,
+  "min_s": 0.00035737501457333565,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 100000,
+  "threads": 8,
+  "median_s": 0.0036205839714966714,
+  "min_s": 0.0035275829723104835,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 1000000,
+  "threads": 8,
+  "median_s": 0.036852208024356514,
+  "min_s": 0.0364815829670988,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 10000000,
+  "threads": 8,
+  "median_s": 0.3685602499754168,
+  "min_s": 0.36636549996910617,
+  "reps": 5
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 1000,
+  "threads": 12,
+  "median_s": 3.866699989885092e-05,
+  "min_s": 3.8375030271708965e-05,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 10000,
+  "threads": 12,
+  "median_s": 0.00037420797161757946,
+  "min_s": 0.0003569999826140702,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 100000,
+  "threads": 12,
+  "median_s": 0.003701290988828987,
+  "min_s": 0.003542874997947365,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 1000000,
+  "threads": 12,
+  "median_s": 0.03676729102153331,
+  "min_s": 0.03630858298856765,
+  "reps": 15
+ },
+ {
+  "code": "pytransit",
+  "mode": "single",
+  "n": 10000000,
+  "threads": 12,
+  "median_s": 0.37200966698583215,
+  "min_s": 0.3700014580390416,
+  "reps": 5
+ },
+ {
+  "code": "pytransit",
+  "mode": "batch",
+  "n": 0,
+  "threads": 0,
+  "median_s": 0.25004302099114284,
+  "min_s": 0.23807975003728643,
+  "reps": 6
+ },
+ {
+  "code": "jaxoplanet",
+  "mode": "batch",
+  "n": 0,
+  "threads": 0,
+  "median_s": 0.9162858329946175,
+  "min_s": 0.9077660419861786,
+  "reps": 3
+ },
+ {
+  "code": "batman",
+  "mode": "batch",
+  "n": 0,
+  "threads": 0,
+  "median_s": 1.8148888330324553,
+  "min_s": 1.8132853750139475,
+  "reps": 3
+ },
+ {
+  "code": "exoplanet",
+  "mode": "batch",
+  "n": 0,
+  "threads": 0,
+  "median_s": 1.5527714590425603,
+  "min_s": 1.5467430000426248,
+  "reps": 3
+ },
+ {
+  "code": "metalplanet_fp64",
+  "mode": "single",
+  "n": 1000,
+  "threads": 0,
+  "median_s": 0.0004505419638007879,
+  "min_s": 0.00041145802242681384,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp64",
+  "mode": "single",
+  "n": 10000,
+  "threads": 0,
+  "median_s": 0.0016203330014832318,
+  "min_s": 0.0015733750187791884,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp64",
+  "mode": "single",
+  "n": 100000,
+  "threads": 0,
+  "median_s": 0.013946916966233402,
+  "min_s": 0.013719625014346093,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp64",
+  "mode": "single",
+  "n": 1000000,
+  "threads": 0,
+  "median_s": 0.131727707979735,
+  "min_s": 0.13062233303207904,
+  "reps": 12
+ },
+ {
+  "code": "metalplanet_fp64",
+  "mode": "single",
+  "n": 10000000,
+  "threads": 0,
+  "median_s": 1.3038533750222996,
+  "min_s": 1.3015818750136532,
+  "reps": 3
+ },
+ {
+  "code": "exoplanet",
+  "mode": "single",
+  "n": 1000,
+  "threads": 1,
+  "median_s": 3.94159578718245e-05,
+  "min_s": 3.570795524865389e-05,
+  "reps": 15
+ },
+ {
+  "code": "exoplanet",
+  "mode": "single",
+  "n": 10000,
+  "threads": 1,
+  "median_s": 0.00029441603692248464,
+  "min_s": 0.000273333047516644,
+  "reps": 15
+ },
+ {
+  "code": "exoplanet",
+  "mode": "single",
+  "n": 100000,
+  "threads": 1,
+  "median_s": 0.0028590839938260615,
+  "min_s": 0.0027619170141406357,
+  "reps": 15
+ },
+ {
+  "code": "exoplanet",
+  "mode": "single",
+  "n": 1000000,
+  "threads": 1,
+  "median_s": 0.029871959006413817,
+  "min_s": 0.029695875011384487,
+  "reps": 15
+ },
+ {
+  "code": "exoplanet",
+  "mode": "single",
+  "n": 10000000,
+  "threads": 1,
+  "median_s": 0.32322033401578665,
+  "min_s": 0.31830012501450256,
+  "reps": 5
+ },
+ {
+  "code": "jaxoplanet",
+  "mode": "single",
+  "n": 1000,
+  "threads": 0,
+  "median_s": 9.012495866045356e-05,
+  "min_s": 7.795903366059065e-05,
+  "reps": 15
+ },
+ {
+  "code": "jaxoplanet",
+  "mode": "single",
+  "n": 10000,
+  "threads": 0,
+  "median_s": 0.0005739170010201633,
+  "min_s": 0.0005203330074436963,
+  "reps": 15
+ },
+ {
+  "code": "jaxoplanet",
+  "mode": "single",
+  "n": 100000,
+  "threads": 0,
+  "median_s": 0.0021531250094994903,
+  "min_s": 0.0020249579683877528,
+  "reps": 15
+ },
+ {
+  "code": "jaxoplanet",
+  "mode": "single",
+  "n": 1000000,
+  "threads": 0,
+  "median_s": 0.020234375027939677,
+  "min_s": 0.019615666999015957,
+  "reps": 15
+ },
+ {
+  "code": "jaxoplanet",
+  "mode": "single",
+  "n": 10000000,
+  "threads": 0,
+  "median_s": 0.17654412501724437,
+  "min_s": 0.17324391601141542,
+  "reps": 9
+ },
+ {
+  "code": "metalplanet_fp32",
+  "mode": "single",
+  "n": 1000,
+  "threads": 0,
+  "median_s": 0.0006810409831814468,
+  "min_s": 0.00020937505178153515,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp32",
+  "mode": "single",
+  "n": 10000,
+  "threads": 0,
+  "median_s": 0.0007664590375497937,
+  "min_s": 0.0007234169752337039,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp32",
+  "mode": "single",
+  "n": 100000,
+  "threads": 0,
+  "median_s": 0.0007864999934099615,
+  "min_s": 0.0006860420107841492,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp32",
+  "mode": "single",
+  "n": 1000000,
+  "threads": 0,
+  "median_s": 0.0014035410131327808,
+  "min_s": 0.0010408330126665533,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp32",
+  "mode": "single",
+  "n": 10000000,
+  "threads": 0,
+  "median_s": 0.00913754099747166,
+  "min_s": 0.008814707980491221,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_gpu",
+  "mode": "batch",
+  "n": 0,
+  "threads": 0,
+  "median_s": 0.00954829202964902,
+  "min_s": 0.009476583043579012,
+  "reps": 15
+ }
+]

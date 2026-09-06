@@ -1,0 +1,122 @@
+[
+ {
+  "code": "metalplanet_gpu",
+  "mode": "batch",
+  "n": 0,
+  "threads": 1,
+  "median_s": 0.001827915955800563,
+  "min_s": 0.0013153330073691905,
+  "reps": 15,
+  "npv": 64
+ },
+ {
+  "code": "pytransit",
+  "mode": "batch",
+  "n": 0,
+  "threads": 1,
+  "median_s": 0.03257308300817385,
+  "min_s": 0.030129916965961456,
+  "reps": 15,
+  "npv": 64
+ },
+ {
+  "code": "metalplanet_gpu",
+  "mode": "batch",
+  "n": 0,
+  "threads": 1,
+  "median_s": 0.004930041963234544,
+  "min_s": 0.004876416991464794,
+  "reps": 15,
+  "npv": 256
+ },
+ {
+  "code": "pytransit",
+  "mode": "batch",
+  "n": 0,
+  "threads": 1,
+  "median_s": 0.12323537550400943,
+  "min_s": 0.11756449996028095,
+  "reps": 12,
+  "npv": 256
+ },
+ {
+  "code": "metalplanet_gpu",
+  "mode": "batch",
+  "n": 0,
+  "threads": 1,
+  "median_s": 0.009554000047501177,
+  "min_s": 0.009491292003076524,
+  "reps": 15,
+  "npv": 512
+ },
+ {
+  "code": "pytransit",
+  "mode": "batch",
+  "n": 0,
+  "threads": 1,
+  "median_s": 0.2393975830054842,
+  "min_s": 0.23183958302251995,
+  "reps": 7,
+  "npv": 512
+ },
+ {
+  "code": "metalplanet_gpu",
+  "mode": "batch",
+  "n": 0,
+  "threads": 1,
+  "median_s": 0.018711292010266334,
+  "min_s": 0.018660125031601638,
+  "reps": 15,
+  "npv": 1024
+ },
+ {
+  "code": "pytransit",
+  "mode": "batch",
+  "n": 0,
+  "threads": 1,
+  "median_s": 0.5231806669617072,
+  "min_s": 0.5199008749914356,
+  "reps": 3,
+  "npv": 1024
+ },
+ {
+  "code": "metalplanet_gpu",
+  "mode": "batch",
+  "n": 0,
+  "threads": 1,
+  "median_s": 0.03718024998670444,
+  "min_s": 0.03713345801224932,
+  "reps": 15,
+  "npv": 2048
+ },
+ {
+  "code": "pytransit",
+  "mode": "batch",
+  "n": 0,
+  "threads": 1,
+  "median_s": 1.0387772080139257,
+  "min_s": 1.023290042008739,
+  "reps": 3,
+  "npv": 2048
+ },
+ {
+  "code": "metalplanet_gpu",
+  "mode": "batch",
+  "n": 0,
+  "threads": 1,
+  "median_s": 0.07410366699332371,
+  "min_s": 0.07405837497208267,
+  "reps": 15,
+  "npv": 4096
+ },
+ {
+  "code": "pytransit",
+  "mode": "batch",
+  "n": 0,
+  "threads": 1,
+  "median_s": 2.0590048750163987,
+  "min_s": 2.0283407919923775,
+  "reps": 3,
+  "npv": 4096
+ }
+]
