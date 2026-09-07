@@ -1,5 +1,8 @@
 # Eccentric fused-kernel design notes
 
+> Implementation plan (v3 kernel + in-kernel VJP reduction, milestones
+> E0-E5): [v3eccentrickernel_plan.md](v3eccentrickernel_plan.md).
+
 Findings from a three-agent verification pass (2026-09-06: symbolic/
 numerical math check, Metal micro-benchmarks, fp32 stability mapping)
 that inform the future eccentric model-level kernel. The graph path
