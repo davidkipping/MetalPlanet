@@ -3,6 +3,21 @@
 All notable changes to MetalPlanet. Versioning: semantic-ish
 (MAJOR.MINOR.PATCH); every release is tagged `vX.Y.Z` in git.
 
+## [Unreleased]
+
+### Added
+- `benchmarks/profile_vjp_reduction.py`: decomposes the v2 VJP into
+  kernel vs `mx.sum`-reduction cost. Measured at 1024×65,536
+  (uncontended): the seven reductions are ~15% of the VJP (5.4 of
+  35.9 ms, streaming at DRAM-peak 345 GB/s) — the kernel is
+  compute-bound, refuting an external 45% / 2–2.4× estimate; verdict
+  recorded in `docs/eccentric-kernel-notes.md`.
+- `docs/v3eccentrickernel_plan.md`: combined implementation plan
+  (milestones E0–E5) for the v3 eccentric fused kernel and the
+  two-stage in-kernel VJP reduction, targeting v0.3.0.
+- `docs/MLXtransit_prompt.md`: the founding project prompt, preserved
+  from the retired MLXtransit working folder.
+
 ## [0.2.0] — 2026-09-06
 
 ### Added
