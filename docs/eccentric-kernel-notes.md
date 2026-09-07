@@ -67,6 +67,35 @@ dE = (dM + sinE de)/D.
   arrays + mx.sum); the wrap term in dphi/dp_off analog is the
   (-k - n) chain as in metal.py's model VJP.
 
+## Measured VJP decomposition: the mx.sum reductions are NOT the lever
+
+An external suggestion claimed the seven per-point partial grids + the
+mx.sum re-read were ~45% of the VJP and that reducing in-kernel would
+give 2-2.4x on gradients. Measured on the shipped v2 kernel at
+1024 x 65,536, uncontended GPU (`benchmarks/profile_vjp_reduction.py`):
+
+| phase | median |
+|---|---:|
+| forward kernel | 20.8 ms |
+| VJP kernel only (writes 7 grids) | 30.6 ms |
+| VJP kernel + 7 sums (as shipped) | 35.9 ms |
+| 7 sums alone | 5.4 ms (345 GB/s — DRAM peak) |
+| full value_and_grad | 60.6 ms |
+
+The traffic arithmetic behind the claim is right (1.88 GB written +
+re-read here; 2.87 GB at m = 100k) but the VJP kernel is
+**compute-bound** — the forward recompute plus eight-parameter chain
+rules dominate — so the reductions are **~15% of the VJP**, and the
+re-read already streams at DRAM peak. A two-stage in-kernel reduction
+(simd_sum per threadgroup -> (n, 7, ceil(m/256)) partials -> tiny
+mx.sum; no atomics needed; requires the predicated early exit noted
+above) projects to **1.16-1.41x on backward, ~1.2x on value+grad** —
+worth bundling into this eccentric kernel's VJP when it is written,
+not shipping as a standalone change. The stronger argument for it is
+**memory, not speed**: it removes the ~28 B/pt transient grids, which
+is what currently caps gradient batch sizes (see
+docs/sampler-integration.md "Memory, gradients").
+
 Agent scratch/verification scripts (session-local, not in repo) were
 validated against tests/test_kepler.py::TestCartesianTail, which pins
 the equivalence, the apastron fp32 bound, and both implicit VJPs.
