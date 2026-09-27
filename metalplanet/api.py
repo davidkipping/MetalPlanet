@@ -45,7 +45,7 @@ import numpy as np
 
 from .flux import flux_dev
 from .metal import flux_dev_metal
-from .kepler import mean_anomaly_offset_at_transit, separation_keplerian
+from .anchored import separation_anchored
 from .solution import sn_dev
 from .trig import sincos
 
@@ -168,9 +168,13 @@ class TransitModel:
             z = mx.sqrt(mx.maximum(z2, 1e-24))
             return z, cphi > 0.0
         w = math.radians(float(params.w))
-        m_tra = mean_anomaly_offset_at_transit(ecc, w)
-        M = (2.0 * math.pi / per) * (t - t0) + m_tra
-        return separation_keplerian(M, ecc, float(params.a), inc, w)
+        phi = (2.0 * math.pi / per) * (t - t0)
+        k = math.sqrt(ecc) * math.cos(w)
+        h = math.sqrt(ecc) * math.sin(w)
+        return separation_anchored(phi, mx.array(k, dtype=self.dtype),
+                                   mx.array(h, dtype=self.dtype),
+                                   mx.array(float(params.a), dtype=self.dtype),
+                                   mx.array(math.cos(inc), dtype=self.dtype))
 
     def _photom(self, z, front, rp, u1, u2, fp):
         if self.transittype == "primary":
@@ -202,9 +206,12 @@ class TransitModel:
                                        1e-24))
                 return self._photom(z, cphi > 0.0, rp, u1, u2, fp)
         else:
-            def raw(t0, per, a, ecc, w, inc, m_tra, rp, u1, u2, fp):
-                M = (2.0 * math.pi) * (t - t0) / per + m_tra
-                z, front = separation_keplerian(M, ecc, a, inc, w)
+            # transit-anchored: phi is measured straight from t0, so no
+            # mean-anomaly-at-transit offset is needed, and float32 stays
+            # accurate all the way to e = 0 (see anchored.py).
+            def raw(t0, per, a, k, h, ci, rp, u1, u2, fp):
+                phi = (2.0 * math.pi) * (t - t0) / per
+                z, front = separation_anchored(phi, k, h, a, ci)
                 return self._photom(z, front, rp, u1, u2, fp)
 
         fn = mx.compile(raw)
@@ -226,10 +233,10 @@ class TransitModel:
                 s(params.t0), s(params.per), s(a), s(a * math.cos(inc)),
                 s(params.rp), s(u1), s(u2), s(fp))
         w = math.radians(float(params.w))
-        m_tra = mean_anomaly_offset_at_transit(ecc, w)
         return self._get_compiled(False)(
-            s(params.t0), s(params.per), s(params.a), s(ecc), s(w),
-            s(inc), s(m_tra), s(params.rp), s(u1), s(u2), s(fp))
+            s(params.t0), s(params.per), s(params.a),
+            s(math.sqrt(ecc) * math.cos(w)), s(math.sqrt(ecc) * math.sin(w)),
+            s(math.cos(inc)), s(params.rp), s(u1), s(u2), s(fp))
 
     # -- batman-compatible surface ----------------------------------------
 
