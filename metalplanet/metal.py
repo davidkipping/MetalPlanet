@@ -370,22 +370,76 @@ _MODEL_VJP_TAIL = """
         dzdb = bv * cphi * cphi / z;
     }
     float ctz = ctv * dFdz;
-    gt0[i] = ctz * dzdphi * (-MP_TWO_PI / P);
-    gp[i]  = ctz * dzdphi
-             * (MP_TWO_PI * ((-kk - n_w) * P - tau) / (P * P));
-    ga[i]  = ctz * dzda;
-    gb[i]  = ctz * dzdb;
-    gr[i]  = ctv * (gc0 * ds0dr + gc1 * ds1dr + gc2 * ds2dr) * inv_norm;
-    gu1[i] = ctv * ((s1d - s0d) * inv_norm
-                    + fdev * (MP_PI / 3.0f) * inv_norm);
-    gu2[i] = ctv * ((-1.5f * s0d + 2.0f * s1d - 0.25f * s2d) * inv_norm
-                    + fdev * (MP_PI / 6.0f) * inv_norm);
+    float p_gt0 = ctz * dzdphi * (-MP_TWO_PI / P);
+    float p_gp  = ctz * dzdphi
+                  * (MP_TWO_PI * ((-kk - n_w) * P - tau) / (P * P));
+    float p_ga  = ctz * dzda;
+    float p_gb  = ctz * dzdb;
+    float p_gr  = ctv * (gc0 * ds0dr + gc1 * ds1dr + gc2 * ds2dr) * inv_norm;
+    float p_gu1 = ctv * ((s1d - s0d) * inv_norm
+                         + fdev * (MP_PI / 3.0f) * inv_norm);
+    float p_gu2 = ctv * ((-1.5f * s0d + 2.0f * s1d - 0.25f * s2d) * inv_norm
+                         + fdev * (MP_PI / 6.0f) * inv_norm);
+VJP_STORE
 """
 
-_MODEL_VJP_SRC = _model_src(
+# Two reduction strategies for the seven per-chain gradients.
+#
+# "grid" (v2 original): write full (n, m) partial arrays, reduce with
+# mx.sum. 28 B/pt of transient DRAM traffic.
+#
+# "simd" (default): reduce inside the kernel. metal::simd_sum operates
+# over the *active* lanes of the SIMD-group, which is exactly what is
+# wanted here — lanes that took the early `return` are inactive and
+# contribute nothing, so no predication, threadgroup memory, barrier or
+# grid padding is needed (verified: benchmarks/v3_reduction_spike.py;
+# MSL specifies these reductions "across all active threads"). The first
+# still-active lane stores one value per simdgroup, so the outputs are
+# (n, ceil(m/32)) instead of (n, m) — 1/32 the traffic. A simdgroup all
+# of whose lanes exited writes nothing at all, which is why the call
+# MUST pass init_value=0.0.
+_VJP_STORE_GRID = """
+    gt0[i] = p_gt0;
+    gp[i]  = p_gp;
+    ga[i]  = p_ga;
+    gb[i]  = p_gb;
+    gr[i]  = p_gr;
+    gu1[i] = p_gu1;
+    gu2[i] = p_gu2;
+"""
+
+_VJP_STORE_SIMD = """
+    p_gt0 = metal::simd_sum(p_gt0);
+    p_gp  = metal::simd_sum(p_gp);
+    p_ga  = metal::simd_sum(p_ga);
+    p_gb  = metal::simd_sum(p_gb);
+    p_gr  = metal::simd_sum(p_gr);
+    p_gu1 = metal::simd_sum(p_gu1);
+    p_gu2 = metal::simd_sum(p_gu2);
+    if (metal::simd_is_first()) {
+        uint ngrp = ((uint)npts + 31u) / 32u;
+        uint o = y * ngrp + x / 32u;
+        gt0[o] = p_gt0;
+        gp[o]  = p_gp;
+        ga[o]  = p_ga;
+        gb[o]  = p_gb;
+        gr[o]  = p_gr;
+        gu1[o] = p_gu1;
+        gu2[o] = p_gu2;
+    }
+"""
+
+_MODEL_VJP_SRC_GRID = _model_src(
     "gt0[i] = 0.0f; gp[i] = 0.0f; gr[i] = 0.0f; gb[i] = 0.0f; "
     "ga[i] = 0.0f; gu1[i] = 0.0f; gu2[i] = 0.0f; return;",
-    _MODEL_VJP_TAIL,
+    _MODEL_VJP_TAIL.replace("VJP_STORE", _VJP_STORE_GRID),
+)
+
+# the simd path needs no exit stores at all: an exited lane is inactive
+# and drops out of simd_sum by itself.
+_MODEL_VJP_SRC_SIMD = _model_src(
+    "return;",
+    _MODEL_VJP_TAIL.replace("VJP_STORE", _VJP_STORE_SIMD),
 )
 
 _kernels: dict = {}
@@ -421,23 +475,34 @@ def _get_model_kernels():
             header=_HEADER,
             source=_MODEL_FWD_SRC,
         )
-        _kernels["model_vjp"] = mx.fast.metal_kernel(
-            name="mp_model_vjp",
-            input_names=["xdat", "t0off", "poff", "rin", "bin", "ain",
-                         "u1in", "u2in", "ct", "pref", "npts"],
-            output_names=["gt0", "gp", "gr", "gb", "ga", "gu1", "gu2"],
-            header=_HEADER,
-            source=_MODEL_VJP_SRC,
-        )
+        for tag, src in (("grid", _MODEL_VJP_SRC_GRID),
+                         ("simd", _MODEL_VJP_SRC_SIMD)):
+            _kernels["model_vjp_" + tag] = mx.fast.metal_kernel(
+                name="mp_model_vjp_" + tag,
+                input_names=["xdat", "t0off", "poff", "rin", "bin", "ain",
+                             "u1in", "u2in", "ct", "pref", "npts"],
+                output_names=["gt0", "gp", "gr", "gb", "ga", "gu1", "gu2"],
+                header=_HEADER,
+                source=src,
+            )
     return _kernels
 
 
-def make_model_core_metal(period_ref: float):
+def make_model_core_metal(period_ref: float, reduce: str = "simd"):
     """v2 model-level kernel: (x, t0_off, p_off, r, b, a, u1, u2) ->
     flux deviation (n, m), the whole orbit + photometric chain in one
     kernel (~12 B/pt of traffic). q -> u and the df0 offset stay in the
     MLX graph so their gradients ride ordinary autodiff. period_ref is a
-    runtime kernel input, never baked into source."""
+    runtime kernel input, never baked into source.
+
+    ``reduce`` selects how the VJP sums its per-point gradients over the
+    data axis: "simd" (default) reduces inside the kernel, "grid" writes
+    full (n, m) partial arrays and reduces with mx.sum. They compute
+    identical per-point partials and differ only in summation order, so
+    "grid" doubles as a parity oracle for "simd" in the tests.
+    """
+    if reduce not in ("simd", "grid"):
+        raise ValueError('reduce must be "simd" or "grid"')
     pref = float(period_ref)
 
     @mx.custom_function
@@ -455,11 +520,19 @@ def make_model_core_metal(period_ref: float):
         ct = cotangent if isinstance(cotangent, mx.array) else cotangent[0]
         n = t0_off.shape[0]
         m = x2d.shape[1]
-        k = _get_model_kernels()["model_vjp"]
-        outs = k(inputs=[x2d, t0_off, p_off, r, b, a, u1, u2, ct, pref,
-                         int(m)],
-                 output_shapes=[(n, m)] * 7, output_dtypes=[mx.float32] * 7,
-                 grid=(m, n, 1), threadgroup=(256, 1, 1))
+        k = _get_model_kernels()["model_vjp_" + reduce]
+        inputs = [x2d, t0_off, p_off, r, b, a, u1, u2, ct, pref, int(m)]
+        if reduce == "simd":
+            # one value per 32-lane simdgroup; init_value is load-bearing
+            # (a fully-exited simdgroup never writes).
+            cols = (m + 31) // 32
+            outs = k(inputs=inputs, output_shapes=[(n, cols)] * 7,
+                     output_dtypes=[mx.float32] * 7, init_value=0.0,
+                     grid=(m, n, 1), threadgroup=(256, 1, 1))
+        else:
+            outs = k(inputs=inputs, output_shapes=[(n, m)] * 7,
+                     output_dtypes=[mx.float32] * 7,
+                     grid=(m, n, 1), threadgroup=(256, 1, 1))
         sums = [mx.sum(o, axis=1) for o in outs]
         return (mx.zeros_like(x2d), *sums)
 

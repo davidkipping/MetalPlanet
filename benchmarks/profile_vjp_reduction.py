@@ -1,7 +1,14 @@
-"""Decompose the v2 VJP cost: kernel dispatch vs the 7 mx.sum reductions.
+"""Decompose the v2 VJP cost and A/B the two reduction strategies.
 
-Claim under test (from anvil session): the per-point partial grids +
-mx.sum re-read are ~45% of the VJP; in-kernel reduction ~2-2.4x on grads.
+"grid": kernel writes 7 full (n, m) partial arrays, mx.sum reduces them.
+"simd": metal::simd_sum reduces inside the kernel; outputs are
+        (n, ceil(m/32)) — 1/32 the transient traffic.
+
+Claim tested originally (from an anvil session): the per-point grids +
+mx.sum re-read were ~45% of the VJP and in-kernel reduction would give
+2-2.4x. Measured: the reductions are ~15% and the kernel is
+compute-bound, so the realistic payoff is ~1.2x — the decisive win is
+the transient memory, not the time.
 """
 import time
 import numpy as np
@@ -15,8 +22,7 @@ REPS = 12
 
 rng = np.random.default_rng(0)
 dt = rng.uniform(-0.2, 0.2, M).astype(np.float32)
-kk = np.zeros(M, dtype=np.float32)
-x2d = mx.array(np.vstack([dt, kk]))
+x2d = mx.array(np.vstack([dt, np.zeros(M, dtype=np.float32)]))
 ones = np.ones(N, dtype=np.float32)
 t0 = mx.array(0.0 * ones); pp = mx.array(0.0 * ones)
 r = mx.array(0.1 * ones); b = mx.array(0.3 * ones)
@@ -26,11 +32,14 @@ ct = mx.ones((N, M), dtype=mx.float32)
 mx.eval(x2d, t0, pp, r, b, a, u1, u2, ct)
 
 kf = _get_model_kernels()["model_fwd"]
-kv = _get_model_kernels()["model_vjp"]
+kg = _get_model_kernels()["model_vjp_grid"]
+ks = _get_model_kernels()["model_vjp_simd"]
+COLS = (M + 31) // 32
+ARGS = [x2d, t0, pp, r, b, a, u1, u2, ct, PREF, M]
+
 
 def timeit(fn, label):
-    fn()  # warmup (JIT + buffers)
-    fn()
+    fn(); fn()                      # warmup (JIT + buffers)
     ts = []
     for _ in range(REPS):
         mx.synchronize()
@@ -39,61 +48,79 @@ def timeit(fn, label):
         mx.synchronize()
         ts.append(time.perf_counter() - t0_)
     med = sorted(ts)[len(ts) // 2]
-    print(f"{label:34s} {med*1e3:8.2f} ms")
+    print(f"{label:38s} {med*1e3:8.2f} ms")
     return med
 
+
 def run_fwd():
-    out = kf(inputs=[x2d, t0, pp, r, b, a, u1, u2, PREF, M],
-             output_shapes=[(N, M)], output_dtypes=[mx.float32],
-             grid=(M, N, 1), threadgroup=(256, 1, 1))[0]
-    mx.eval(out)
+    mx.eval(kf(inputs=[x2d, t0, pp, r, b, a, u1, u2, PREF, M],
+               output_shapes=[(N, M)], output_dtypes=[mx.float32],
+               grid=(M, N, 1), threadgroup=(256, 1, 1))[0])
 
-def run_vjp_kernel_only():
-    outs = kv(inputs=[x2d, t0, pp, r, b, a, u1, u2, ct, PREF, M],
-              output_shapes=[(N, M)] * 7, output_dtypes=[mx.float32] * 7,
+
+def grid_kernel_only():
+    mx.eval(*kg(inputs=ARGS, output_shapes=[(N, M)] * 7,
+                output_dtypes=[mx.float32] * 7,
+                grid=(M, N, 1), threadgroup=(256, 1, 1)))
+
+
+def grid_full():
+    outs = kg(inputs=ARGS, output_shapes=[(N, M)] * 7,
+              output_dtypes=[mx.float32] * 7,
               grid=(M, N, 1), threadgroup=(256, 1, 1))
-    mx.eval(*outs)
+    mx.eval(*[mx.sum(o, axis=1) for o in outs])
 
-def run_vjp_with_sums():
-    outs = kv(inputs=[x2d, t0, pp, r, b, a, u1, u2, ct, PREF, M],
-              output_shapes=[(N, M)] * 7, output_dtypes=[mx.float32] * 7,
+
+def simd_full():
+    outs = ks(inputs=ARGS, output_shapes=[(N, COLS)] * 7,
+              output_dtypes=[mx.float32] * 7, init_value=0.0,
               grid=(M, N, 1), threadgroup=(256, 1, 1))
-    sums = [mx.sum(o, axis=1) for o in outs]
-    mx.eval(*sums)
+    mx.eval(*[mx.sum(o, axis=1) for o in outs])
 
-grids = kv(inputs=[x2d, t0, pp, r, b, a, u1, u2, ct, PREF, M],
-           output_shapes=[(N, M)] * 7, output_dtypes=[mx.float32] * 7,
+
+grids = kg(inputs=ARGS, output_shapes=[(N, M)] * 7,
+           output_dtypes=[mx.float32] * 7,
            grid=(M, N, 1), threadgroup=(256, 1, 1))
 mx.eval(*grids)
 
-def run_sums_alone():
-    sums = [mx.sum(o, axis=1) for o in grids]
-    mx.eval(*sums)
 
-core = make_model_core_metal(PREF)
-def loss(t0_, pp_, r_, b_, a_, u1_, u2_):
-    return mx.sum(core(x2d, t0_, pp_, r_, b_, a_, u1_, u2_))
-vg = mx.value_and_grad(loss, argnums=tuple(range(7)))
-def run_value_grad():
-    v, g = vg(t0, pp, r, b, a, u1, u2)
-    mx.eval(v, *g)
+def sums_alone():
+    mx.eval(*[mx.sum(o, axis=1) for o in grids])
 
+
+def value_grad(reduce):
+    core = make_model_core_metal(PREF, reduce=reduce)
+
+    def loss(*p):
+        return mx.sum(core(x2d, *p))
+    vg = mx.value_and_grad(loss, argnums=tuple(range(7)))
+
+    def run():
+        v, g = vg(t0, pp, r, b, a, u1, u2)
+        mx.eval(v, *g)
+    return run
+
+
+print(f"=== v2 model kernel, {N} x {M:,} ===")
 t_fwd = timeit(run_fwd, "forward kernel")
-t_k = timeit(run_vjp_kernel_only, "VJP kernel only (7 grids, no sum)")
-t_ks = timeit(run_vjp_with_sums, "VJP kernel + 7 sums (as shipped)")
-t_s = timeit(run_sums_alone, "7 sums alone (grids pre-built)")
-t_vg = timeit(run_value_grad, "full value_and_grad")
+t_gk = timeit(grid_kernel_only, "grid: VJP kernel only (7 grids)")
+t_g = timeit(grid_full, "grid: kernel + 7 mx.sum")
+t_s = timeit(sums_alone, "grid: the 7 sums alone")
+t_simd = timeit(simd_full, "simd: kernel + reduction (in-kernel)")
+t_vgg = timeit(value_grad("grid"), "value_and_grad (grid)")
+t_vgs = timeit(value_grad("simd"), "value_and_grad (simd)")
 
 gb = N * M * 7 * 4 / 1e9
-print(f"\ngrid traffic: {gb:.2f} GB written + {gb:.2f} GB re-read")
-print(f"sum read bandwidth: {gb / t_s:.0f} GB/s")
-print(f"reduction share of VJP: {(t_ks - t_k) / t_ks * 100:.0f}% "
-      f"(in-situ) / {t_s / t_ks * 100:.0f}% (sums alone)")
-print(f"write-side saving upper bound: {t_s*1e3:.1f} ms "
-      f"(store GB = read GB; only if stores were bandwidth-serialized)")
-lo = t_k + 0.3e-3           # keep all kernel time, tiny partial-sum cost
-hi = max(t_k - gb / (gb / t_s), t_fwd) + 0.3e-3  # also save the stores
-print(f"projected VJP after in-kernel reduction: {lo*1e3:.1f}-"
-      f"{hi*1e3:.1f} ms -> backward speedup {t_ks/lo:.2f}-{t_ks/hi:.2f}x")
-print(f"projected value+grad: {(t_fwd+lo)*1e3:.1f}-{(t_fwd+hi)*1e3:.1f} ms "
-      f"vs {t_vg*1e3:.1f} ms now")
+gb_s = N * COLS * 7 * 4 / 1e9
+print(f"\ntransients: grid {gb:.2f} GB written + re-read"
+      f"  |  simd {gb_s*1e3:.1f} MB  ({gb/gb_s:.0f}x less)")
+print(f"reduction share of grid VJP: {t_s / t_g * 100:.0f}%")
+print(f"backward speedup (simd vs grid):   {t_g / t_simd:.2f}x")
+print(f"value+grad speedup (simd vs grid): {t_vgg / t_vgs:.2f}x")
+
+for tag, run in (("grid", value_grad("grid")), ("simd", value_grad("simd"))):
+    mx.clear_cache()
+    mx.reset_peak_memory()
+    run()
+    print(f"peak memory, value_and_grad ({tag}): "
+          f"{mx.get_peak_memory() / 1e9:.2f} GB")

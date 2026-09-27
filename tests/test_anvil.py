@@ -107,13 +107,19 @@ class TestPrecisionHarness:
         assert report.max_abs_err < 0.6
 
     def test_loglike_at_truth_is_sane(self, tt):
-        """At truth, chi^2/n ~ 1."""
+        """At truth, chi^2/n ~ 1.
+
+        The engine's recentring policy subtracts 1/2 per datum so the
+        fp32 sum straddles zero; ``log_offset_const`` carries that back,
+        and the unnormalized log-likelihood is value + log_offset_const.
+        """
         with mx.stream(mx.cpu):
             lp = np.array(tt.loglike.hi(
                 mx.array(tt.truth_model[None, :], dtype=mx.float64)),
                 dtype=np.float64)[0]
         n = tt.y.size
-        assert abs(-2.0 * lp / n - 1.0) < 0.02
+        chi2 = -2.0 * (lp + tt.loglike.log_offset_const)
+        assert abs(chi2 / n - 1.0) < 0.02
 
 
 @pytest.mark.slow

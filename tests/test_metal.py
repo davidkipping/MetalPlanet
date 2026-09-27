@@ -285,3 +285,93 @@ class TestModelKernel:
         x = mx.array(np.stack([dt, np.zeros_like(dt)]).astype(np.float32))
         out = np.array(m2(mx.array(v), x), dtype=np.float64)
         np.testing.assert_allclose(out, 2e-4, rtol=0, atol=1e-9)
+
+
+class TestSimdReduction:
+    """E0: the VJP reduces per-chain gradients inside the kernel via
+    metal::simd_sum over ACTIVE lanes. The 'grid' path (full (n, m)
+    partial arrays + mx.sum) computes identical per-point partials and
+    is kept as the parity oracle."""
+
+    PREF = 3.456
+
+    def _args(self, n, m, span=0.5):
+        dt = np.linspace(-span, span, m).astype(np.float32)
+        x2d = mx.array(np.vstack([dt, np.zeros(m, np.float32)]))
+        o = np.ones(n, np.float32)
+        return (x2d, mx.array(0.0 * o), mx.array(0.0 * o), mx.array(0.1 * o),
+                mx.array(0.3 * o), mx.array(8.8 * o), mx.array(0.4225 * o),
+                mx.array(0.3077 * o))
+
+    def _grads(self, reduce, args, ct):
+        from metalplanet.metal import make_model_core_metal
+        core = make_model_core_metal(self.PREF, reduce=reduce)
+
+        def f(*p):
+            return mx.sum(core(args[0], *p) * ct)
+
+        g = mx.grad(f, argnums=tuple(range(7)))(*args[1:])
+        return np.array([np.array(v, dtype=np.float64) for v in g])
+
+    @pytest.mark.parametrize("n,m", [(1, 1), (1, 31), (1, 32), (1, 33),
+                                     (3, 255), (3, 256), (3, 257),
+                                     (7, 1000), (9, 4096)])
+    def test_simd_matches_grid(self, n, m):
+        """Partial simdgroups and partial threadgroups: x/32 must track
+        the simdgroup the lane actually sits in."""
+        args = self._args(n, m)
+        ct = mx.array(np.random.default_rng(n * 97 + m)
+                      .standard_normal((n, m)).astype(np.float32))
+        gs = self._grads("simd", args, ct)
+        gg = self._grads("grid", args, ct)
+        assert np.abs(gs - gg).max() / max(np.abs(gg).max(), 1e-30) < 2e-5
+
+    def test_all_out_of_transit_is_exactly_zero(self):
+        """Every lane early-returns, so no simdgroup writes at all: the
+        kernel's init_value is what makes the partials read as zero."""
+        m = 512
+        dt = np.full(m, 0.5, np.float32)       # far from any transit
+        x2d = mx.array(np.vstack([dt, np.zeros(m, np.float32)]))
+        o = np.ones(4, np.float32)
+        args = (x2d, mx.array(0.0 * o), mx.array(0.0 * o), mx.array(0.1 * o),
+                mx.array(0.3 * o), mx.array(8.8 * o), mx.array(0.4225 * o),
+                mx.array(0.3077 * o))
+        g = self._grads("simd", args, mx.ones((4, m)))
+        assert np.all(g == 0.0)
+
+    def test_simd_sum_ignores_returned_lanes(self):
+        """Pin the MSL semantics the design rests on: simd_sum reduces
+        over ACTIVE lanes, so lanes that hit `return` drop out by
+        themselves and simd_is_first() picks the lowest surviving lane.
+        Guards against a compiler/runtime change invalidating E0."""
+        src = """
+            uint x = thread_position_in_grid.x;
+            if (x >= (uint)npts) return;
+            float v = xin[x];
+            if (v <= 0.0f) return;
+            float s = metal::simd_sum(v);
+            if (metal::simd_is_first()) part[x / 32u] = s;
+        """
+        k = mx.fast.metal_kernel(name="mp_test_simd_active",
+                                 input_names=["xin", "npts"],
+                                 output_names=["part"], source=src)
+        m = 1000
+        v = np.random.default_rng(5).uniform(-1, 1, m).astype(np.float32)
+        out = k(inputs=[mx.array(v), m], output_shapes=[((m + 31) // 32,)],
+                output_dtypes=[mx.float32], init_value=0.0,
+                grid=(m, 1, 1), threadgroup=(256, 1, 1))[0]
+        got = float(mx.sum(out))
+        want = float(v[v > 0].sum())
+        assert abs(got - want) <= 1e-5 * abs(want)
+
+    def test_forward_is_unaffected(self):
+        from metalplanet.metal import make_model_core_metal
+        args = self._args(8, 1000)
+        a = np.array(make_model_core_metal(self.PREF, reduce="simd")(*args))
+        b = np.array(make_model_core_metal(self.PREF, reduce="grid")(*args))
+        np.testing.assert_array_equal(a, b)
+
+    def test_rejects_unknown_reduce(self):
+        from metalplanet.metal import make_model_core_metal
+        with pytest.raises(ValueError):
+            make_model_core_metal(self.PREF, reduce="atomic")

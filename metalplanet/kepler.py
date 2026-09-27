@@ -55,20 +55,12 @@ def _unbroadcast(grad: mx.array, shape) -> mx.array:
     return grad
 
 
-def _solve_sincos_E(M: mx.array, e):
-    """(sin E, cos E) via Markley starter + one fifth-order refinement;
-    exactly one sincos evaluation per point. Shared by the two public
-    custom functions (``kepler`` and ``kepler_E_sincos``)."""
-    zero = M * 0.0 + e * 0.0
-    M = M + zero
-    e = e + zero
-
-    # wrap to [-pi, pi], solve on |M| in [0, pi] (E is odd in M)
-    M = M - _TWO_PI * mx.round(M / _TWO_PI)
-    sign = mx.where(M >= 0.0, 1.0 + zero, -1.0 + zero)
-    Ma = mx.abs(M)
-
-    # ---- Markley (1995) cubic starter (pure algebra; ~1e-4 accurate) ----
+def _markley_starter(Ma: mx.array, e):
+    """Markley (1995) cubic starter for |M| in [0, pi]: pure algebra,
+    ~1e-4 accurate, no trig. Shared by the direct solver and the
+    transit-anchored one in ``anchored.py`` (where it only seeds a
+    refinement, so its accuracy and its gradients are both irrelevant).
+    """
     ome = 1.0 - e
     M2 = Ma * Ma
     alpha = _MK_A + _MK_B * (_PI - Ma) / (1.0 + e)
@@ -82,7 +74,24 @@ def _solve_sincos_E(M: mx.array, e):
     # ~1e-4 so MLX's transcendental accuracy is irrelevant here
     c = mx.abs(rr) + mx.sqrt(mx.maximum(q2 * q + rr * rr, 1e-300))
     w = mx.exp((2.0 / 3.0) * mx.log(c))
-    E = (2.0 * rr * w / (w * w + w * q + q2) + Ma) / d
+    return (2.0 * rr * w / (w * w + w * q + q2) + Ma) / d
+
+
+def _solve_sincos_E(M: mx.array, e):
+    """(sin E, cos E) via Markley starter + one fifth-order refinement;
+    exactly one sincos evaluation per point. Shared by the two public
+    custom functions (``kepler`` and ``kepler_E_sincos``)."""
+    zero = M * 0.0 + e * 0.0
+    M = M + zero
+    e = e + zero
+
+    # wrap to [-pi, pi], solve on |M| in [0, pi] (E is odd in M)
+    M = M - _TWO_PI * mx.round(M / _TWO_PI)
+    sign = mx.where(M >= 0.0, 1.0 + zero, -1.0 + zero)
+    Ma = mx.abs(M)
+
+    ome = 1.0 - e
+    E = _markley_starter(Ma, e)
 
     # ---- one fifth-order (Nijenhuis/Markley) correction -----------------
     sE_raw, cE_raw = sincos(E)          # the ONLY trig call
