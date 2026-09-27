@@ -156,3 +156,36 @@ class TestConditioning:
         g = mx.grad(self._loss, argnums=(0, 1))(
             mx.array(np.float32(0.0)), mx.array(np.float32(0.0)), phi)
         assert all(np.isfinite(np.array(v)).all() for v in g)
+
+
+class TestNearPiDelta:
+    """delta ~ pi (the apastron side of the orbit) is ordinary geometry,
+    and 1 - cos(delta) must stay differentiable there: a floored
+    denominator would give 0 * inf = NaN in the backward pass."""
+
+    def test_one_minus_cos_gradient_is_finite_at_cos_minus_one(self):
+        with mx.stream(mx.cpu):
+            x = mx.array(np.array([math.pi - 1e-8, math.pi, math.pi + 1e-8,
+                                   math.pi / 2, 0.3]))
+            g = mx.grad(lambda t: mx.sum(
+                _one_minus_cos(mx.sin(t), mx.cos(t))))(x)
+            assert np.isfinite(np.array(g)).all()
+            # and it is the right derivative: d(1 - cos t)/dt = sin t
+            np.testing.assert_allclose(np.array(g), np.sin(np.array(x)),
+                                       atol=1e-12)
+
+    def test_separation_gradient_finite_over_whole_orbit(self):
+        """Sweep phi across the full orbit for several (e, w), including
+        the points that put delta at pi."""
+        phi = mx.array(np.linspace(-math.pi, math.pi, 2001))
+        for e, wdeg in [(0.0, 0.0), (0.2, 90.0), (0.5, 270.0), (0.9, 180.0)]:
+            w = math.radians(wdeg)
+            k, h = _kh(e, w)
+
+            def loss(kk, hh):
+                z, _ = separation_anchored(phi, kk, hh, A, CI)
+                return mx.sum(z)
+
+            g = mx.grad(loss, argnums=(0, 1))(
+                mx.array(np.float32(k)), mx.array(np.float32(h)))
+            assert all(np.isfinite(np.array(v)).all() for v in g), (e, wdeg)

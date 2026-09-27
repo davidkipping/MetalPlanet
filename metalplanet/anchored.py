@@ -68,8 +68,17 @@ def _sqrt_any(x):
 
 
 def _one_minus_cos(s, c):
-    """1 - cos, from (sin, cos), without cancellation at either end."""
-    return mx.where(c > 0.0, s * s / mx.maximum(1.0 + c, 1e-30), 1.0 - c)
+    """1 - cos, from (sin, cos), without cancellation at either end.
+
+    The inactive branch's denominator is set to 1, not floored: a floored
+    1 + c is forward-safe, but its VJP -s^2/(1+c)^2 blows up as c -> -1
+    and the mask's zero cotangent then yields 0 * inf = NaN. delta ~ pi
+    is an ordinary apastron-side geometry, so this is reached in normal
+    sampling, not just at a measure-zero point.
+    """
+    pos = c > 0.0
+    den = mx.where(pos, 1.0 + c, mx.ones_like(c))
+    return mx.where(pos, s * s / den, 1.0 - c)
 
 
 def anchor_constants(k, h):
@@ -201,3 +210,28 @@ def separation_anchored(phi, k, h, a, ci, eps: float = 1.1920929e-07):
     v = a * (A2 * cosd - B2 * sind - esw)
     z = mx.sqrt(mx.maximum(u * u + (v * ci) ** 2, (10.0 * eps) ** 2))
     return z, v > 0.0
+
+
+#: column order of the packed per-chain orbit constants consumed by the
+#: v3 Metal kernel; kept in lockstep with ``metal._ORB_COLS``.
+ORB_COLS = ("ecw", "esw", "es", "ec", "b1", "a2", "b2",
+            "ecc", "e0", "mtra", "ci")
+
+
+def pack_orbit_constants(k, h, ci):
+    """(k, h, ci) -> (n, 11) per-chain constants for the v3 kernel.
+
+    The last three of the first eight columns feed the Cartesian tail and
+    the solve; ``ecc``/``e0``/``mtra`` seed the Markley starter and the
+    2-pi fold *only*, so they are detached: the implicit function theorem
+    makes the converged root independent of its starter, and rint is
+    locally constant, so their true gradient contribution is zero.
+    Detaching also keeps E0 = atan2(es, ec) — undefined at e = 0 — out
+    of the autodiff graph entirely.
+    """
+    e, ecw, esw, es, ec, B1, A2, B2 = anchor_constants(k, h)
+    E0 = mx.stop_gradient(mx.arctan2(es, ec))
+    cols = [ecw, esw, es, ec, B1, A2, B2,
+            mx.stop_gradient(e), E0, mx.stop_gradient(E0 - es),
+            ci * mx.ones_like(ecw)]
+    return mx.stack([mx.reshape(c, (-1,)) for c in cols], axis=1)

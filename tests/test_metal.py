@@ -2,6 +2,8 @@
 failure-mode matrix from the reviewed plan, and fp64-oracle adjudication.
 Skips wholesale on machines without a usable Metal device."""
 
+import math
+
 import numpy as np
 import mlx.core as mx
 import pytest
@@ -375,3 +377,182 @@ class TestSimdReduction:
         from metalplanet.metal import make_model_core_metal
         with pytest.raises(ValueError):
             make_model_core_metal(self.PREF, reduce="atomic")
+
+
+class TestEccentricKernel:
+    """v3: the transit-anchored eccentric orbit fused with the
+    photometric core, plus its analytic VJP.
+
+    The graph path (metalplanet.anchored) is the reference; it is itself
+    pinned against kepler.separation_keplerian and finite differences in
+    tests/test_anchored.py, so kernel -> graph -> FD closes the chain.
+    """
+
+    PREF, A, RP, U1c, U2c = 3.456, 8.8, 0.1, 0.4225, 0.3077
+    CI = 0.3 / 8.8
+
+    @staticmethod
+    def _core():
+        from metalplanet.metal import make_ecc_core_metal
+        return make_ecc_core_metal(TestEccentricKernel.PREF)
+
+    def _inputs(self, e, wdeg, n=4, m=2048, seed=2, f64=False):
+        rng = np.random.default_rng(seed)
+        w = math.radians(wdeg)
+        dt = np.sort(rng.uniform(-1.8, 1.8, m))
+        kk = rng.integers(0, 40, m).astype(float)
+        npd = np.float64 if f64 else np.float32
+        x2d = mx.array(np.stack([dt, kk]).astype(npd))
+        o = np.ones(n)
+
+        def arr(v):
+            return mx.array((v * o).astype(npd))
+
+        return x2d, [arr(0.004), arr(-0.0007), arr(self.RP), arr(self.A),
+                     arr(math.sqrt(e) * math.cos(w)),
+                     arr(math.sqrt(e) * math.sin(w)),
+                     arr(self.CI), arr(self.U1c), arr(self.U2c)]
+
+    def _graph(self, x2d, t0, pof, r, a, k, h, ci, u1, u2):
+        from metalplanet.anchored import separation_anchored
+        dt = x2d[0][None, :]
+        kk = x2d[1][None, :]
+        P = (self.PREF + pof)[:, None]
+        tau = dt - (t0[:, None] + kk * pof[:, None])
+        tau = tau - P * mx.round(tau / P)
+        phi = (2.0 * math.pi) * tau / P
+        z, front = separation_anchored(phi, k[:, None], h[:, None],
+                                       a[:, None], ci[:, None])
+        f = flux_dev(z, r[:, None], u1[:, None], u2[:, None])
+        return mx.where(front & (z < 1.0 + r[:, None]), f, 0.0)
+
+    def _kernel(self, x2d, t0, pof, r, a, k, h, ci, u1, u2):
+        from metalplanet.anchored import pack_orbit_constants
+        return self._core()(x2d, t0, pof, r, a,
+                            pack_orbit_constants(k, h, ci), u1, u2)
+
+    @pytest.mark.parametrize("e", [0.0, 1e-6, 1e-3, 0.05, 0.3, 0.7, 0.9,
+                                   0.99, 0.999])
+    @pytest.mark.parametrize("wdeg", [0.0, 90.0, 180.0, 270.0])
+    def test_forward_parity(self, e, wdeg):
+        """5e-7 for e <= 0.9; above that dE/dM = 1/(1 - e cos E) reaches
+        1/(1-e), so two correct fp32 solvers legitimately part company
+        and the fp64 oracle adjudicates instead."""
+        x2d, args = self._inputs(e, wdeg)
+        kn = np.array(self._kernel(x2d, *args), dtype=np.float64)
+        gr = np.array(self._graph(x2d, *args), dtype=np.float64)
+        x64, a64 = self._inputs(e, wdeg, f64=True)
+        with mx.stream(mx.cpu):
+            ref = np.array(self._graph(x64, *a64), dtype=np.float64)
+        d_kg = np.abs(kn - gr).max()
+        if e <= 0.9:
+            assert d_kg < 5e-7
+        else:
+            assert np.abs(kn - ref).max() < 3.0 * max(
+                np.abs(gr - ref).max(), 5e-7)
+
+    def test_exact_circular_limit(self):
+        """e = 0 must reproduce the v2 circular kernel: same orbit, and
+        b = a cos i is the same impact parameter."""
+        from metalplanet.metal import make_model_core_metal
+        x2d, args = self._inputs(0.0, 0.0, n=4, m=2048)
+        t0, pof, r, a, k, h, ci, u1, u2 = args
+        ecc = np.array(self._kernel(x2d, *args), dtype=np.float64)
+        circ = np.array(make_model_core_metal(self.PREF)(
+            x2d, t0, pof, r, a * ci, a, u1, u2), dtype=np.float64)
+        assert np.abs(ecc - circ).max() < 5e-7
+
+    @pytest.mark.parametrize("e,wdeg", [(0.0, 0.0), (1e-4, 90.0),
+                                        (0.05, 270.0), (0.3, 90.0),
+                                        (0.7, 180.0)])
+    def test_gradient_parity_all_nine(self, e, wdeg):
+        """Every chain rule, against the float64 graph. A wrong rule is
+        an O(1) error; the tolerance only has to exclude that, since
+        both fp32 paths share the solve's ~1e-7 floor in delta, which
+        dz/dci amplifies geometrically."""
+        x2d, args = self._inputs(e, wdeg, n=3, m=2048)
+        x64, a64 = self._inputs(e, wdeg, n=3, m=2048, f64=True)
+        ct = mx.ones((3, 2048))
+        idx = tuple(range(1, 10))
+
+        def kloss(x, *p):
+            return mx.sum(self._kernel(x, *p) * ct)
+
+        def gloss(x, *p):
+            return mx.sum(self._graph(x, *p)
+                          * mx.array(np.ones((3, 2048), np.float64)))
+
+        gk = mx.grad(kloss, argnums=idx)(x2d, *args)
+        with mx.stream(mx.cpu):
+            gr = mx.grad(gloss, argnums=idx)(x64, *a64)
+        for j, (kv, rv) in enumerate(zip(gk, gr)):
+            k_ = np.array(kv, dtype=np.float64)
+            r_ = np.array(rv, dtype=np.float64)
+            sc = max(np.abs(r_).max(), 1e-12)
+            assert np.abs(k_ - r_).max() / sc < 2e-3, (j, e, wdeg)
+
+    def test_starter_columns_get_zero_gradient(self):
+        """ecc / e0 / mtra seed only the Markley starter and the 2-pi
+        fold; their exact gradient is zero and pack_orbit_constants
+        detaches them, so the kernel must return zeros there."""
+        from metalplanet.anchored import pack_orbit_constants
+        from metalplanet.metal import _ORB_COLS
+        x2d, args = self._inputs(0.3, 47.0, n=2, m=1024)
+        t0, pof, r, a, k, h, ci, u1, u2 = args
+        orb = pack_orbit_constants(k, h, ci)
+
+        def loss(ob):
+            return mx.sum(self._core()(x2d, t0, pof, r, a, ob, u1, u2) ** 2)
+
+        g = np.array(mx.grad(loss)(orb))
+        for name in ("ecc", "e0", "mtra"):
+            assert np.all(g[:, _ORB_COLS.index(name)] == 0.0), name
+        assert np.abs(g[:, _ORB_COLS.index("ecw")]).max() > 0.0
+
+    @pytest.mark.parametrize("m", [1, 31, 32, 33, 255, 256, 257, 1000])
+    def test_partial_simdgroups(self, m):
+        x2d, args = self._inputs(0.3, 47.0, n=3, m=m)
+        out = np.array(self._kernel(x2d, *args), dtype=np.float64)
+        ref = np.array(self._graph(x2d, *args), dtype=np.float64)
+        assert np.abs(out - ref).max() < 5e-7
+        ct = mx.ones((3, m))
+
+        def kloss(*p):
+            return mx.sum(self._kernel(x2d, *p) * ct)
+
+        g = mx.grad(kloss, argnums=tuple(range(9)))(*args)
+        assert all(np.isfinite(np.array(v)).all() for v in g)
+
+    def test_all_out_of_transit_zero_flux_and_gradient(self):
+        n, m = 3, 512
+        o = np.ones(n, np.float32)
+        x2d = mx.array(np.vstack([np.full(m, 1.2, np.float32),
+                                  np.zeros(m, np.float32)]))
+        args = [mx.array(0.0 * o), mx.array(0.0 * o), mx.array(0.1 * o),
+                mx.array(self.A * o), mx.array(np.float32(0.3) * o),
+                mx.array(np.float32(0.4) * o), mx.array(np.float32(self.CI) * o),
+                mx.array(0.4225 * o), mx.array(0.3077 * o)]
+        out = np.array(self._kernel(x2d, *args))
+        assert np.all(out == 0.0)
+
+        def kloss(*p):
+            return mx.sum(self._kernel(x2d, *p))
+
+        g = mx.grad(kloss, argnums=tuple(range(9)))(*args)
+        assert all(np.all(np.array(v) == 0.0) for v in g)
+
+    def test_compile_grad_composition(self):
+        x2d, args = self._inputs(0.3, 47.0, n=2, m=512)
+
+        def loss(*p):
+            return mx.sum(self._kernel(x2d, *p) ** 2)
+
+        f = mx.compile(mx.grad(loss, argnums=tuple(range(9))))
+        g = f(*args)
+        assert all(np.isfinite(np.array(v)).all() for v in g)
+
+    def test_deterministic(self):
+        x2d, args = self._inputs(0.3, 47.0, n=3, m=1024)
+        a = np.array(self._kernel(x2d, *args))
+        b = np.array(self._kernel(x2d, *args))
+        np.testing.assert_array_equal(a, b)

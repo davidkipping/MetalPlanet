@@ -42,7 +42,8 @@ import mlx.core as mx
 
 from .vjp import _unbroadcast, flux_dev_analytic
 
-__all__ = ["flux_dev_metal", "metal_available"]
+__all__ = ["flux_dev_metal", "metal_available",
+           "make_model_core_metal", "make_ecc_core_metal"]
 
 _EPS = "1.1920929e-07f"
 _D_CON = "3.4526698e-04f"          # sqrt(fp32 eps)
@@ -52,6 +53,29 @@ _HEADER = """
 constant float MP_PI = 3.14159265358979f;
 constant float MP_TWO_PI = 6.28318530717959f;
 constant float MP_HALF_PI = 1.57079632679490f;
+constant float MP_MK_A = 7.651638290f;      // 3 pi / (pi - 6/pi)
+constant float MP_MK_B = 1.298982460f;      // 1.6 / (pi - 6/pi)
+
+// cbrt(c)^2 for the Markley starter. metal::precise::powr costs ~220x
+// a multiply and was ~20% of the orbit's time; this is the inverse-cbrt
+// bit trick plus three division-free Newton steps
+// (r <- r (4 - c r^3) / 3, converging to r = c^-1/3), then cbrt = c r^2.
+// The seed constant is the exact (4/3) * 0x3f800000 of the standard
+// i_y = (1 - p) B + p i_x construction with p = -1/3, not a tuned one.
+// Measured max relative error 1.7e-6 in-kernel over c in
+// [1e-15, 1e15] (fp32 Newton steps; 1.2e-6 in exact arithmetic); the
+// starter itself only needs ~1e-4, and the fifth-order refinement
+// downstream squashes what is left. c is always >= 1e-15 here (a sqrt
+// of a floored argument), so denormals never reach the trick.
+inline float mp_cbrt2(float c) {
+    int ic = as_type<int>(c);
+    float r = as_type<float>(0x54AAAAAB - ic / 3);
+    r = r * (1.33333333f - 0.33333333f * c * r * r * r);
+    r = r * (1.33333333f - 0.33333333f * c * r * r * r);
+    r = r * (1.33333333f - 0.33333333f * c * r * r * r);
+    float y = c * r * r;
+    return y * y;
+}
 """
 
 # ---------------------------------------------------------------------------
@@ -220,20 +244,9 @@ _CORE = """
 """
 
 
-def _src(early_exit: str, tail: str) -> str:
-    return (_CORE.replace("EARLY_EXIT", early_exit)
-            .replace("EPS", _EPS)
-            .replace("D_CON", _D_CON)
-            .replace("KITE_FLOOR", _KITE_FLOOR) + tail)
-
-
-_FWD_SRC = _src(
-    "if (z >= 1.0f + r) { out[i] = 0.0f; return; }",
-    "    out[i] = fdev;\n",
-)
-
-# analytic partials (continuous generic forms, as in vjp.sn_partials)
-_VJP_TAIL = """
+# ds_n/dz and ds_n/dr — the continuous generic forms of
+# vjp.sn_partials, shared verbatim by every VJP tail below.
+_PHOT_PARTIALS = '''
     float ds0dz, ds0dr, ds2dz, ds2dr;
     if (m_comp) {
         ds0dr = -2.0f * MP_PI * r;
@@ -258,6 +271,33 @@ _VJP_TAIL = """
         ds1dr = -4.0f * r * sq1 * E_;
         ds1dz = -(4.0f / 3.0f) * r * sq1 * (E_ - 2.0f * Em);
     }
+'''
+
+def _subst(src: str) -> str:
+    """Expand the shared fragments and numeric constants. Applied to the
+    WHOLE kernel body, tail included — a marker left unexpanded is not a
+    Python error but a Metal compile failure, which aborts the process."""
+    out = (src.replace("PHOT_PARTIALS", _PHOT_PARTIALS)
+              .replace("EPS", _EPS)
+              .replace("D_CON", _D_CON)
+              .replace("KITE_FLOOR", _KITE_FLOOR))
+    for marker in ("PHOT_PARTIALS", "EARLY_EXIT", "ORBIT_EXIT", "VJP_STORE"):
+        assert marker not in out, f"unexpanded {marker} in kernel source"
+    return out
+
+
+def _src(early_exit: str, tail: str) -> str:
+    return _subst(_CORE.replace("EARLY_EXIT", early_exit) + tail)
+
+
+_FWD_SRC = _src(
+    "if (z >= 1.0f + r) { out[i] = 0.0f; return; }",
+    "    out[i] = fdev;\n",
+)
+
+# analytic partials (continuous generic forms, as in vjp.sn_partials)
+_VJP_TAIL = """
+PHOT_PARTIALS
     float ctv = ct[i];
     gz[i] = ctv * (gc0 * ds0dz + gc1 * ds1dz + gc2 * ds2dz) * inv_norm;
     gr[i] = ctv * (gc0 * ds0dr + gc1 * ds1dr + gc2 * ds2dr) * inv_norm;
@@ -316,9 +356,8 @@ _ORBIT = """
 
 
 def _model_src(exit_stores: str, tail: str) -> str:
-    return (_HEADER_UNUSED_GUARD + _ORBIT.replace("ORBIT_EXIT", exit_stores)
-            + _PHOT + tail).replace("EPS", _EPS).replace(
-                "D_CON", _D_CON).replace("KITE_FLOOR", _KITE_FLOOR)
+    return _subst(_HEADER_UNUSED_GUARD
+                  + _ORBIT.replace("ORBIT_EXIT", exit_stores) + _PHOT + tail)
 
 
 _HEADER_UNUSED_GUARD = ""  # placeholder to keep _model_src symmetrical
@@ -335,30 +374,7 @@ _MODEL_FWD_SRC = _model_src("out[i] = 0.0f; return;",
 #     dz/dphi = (a^2 - b^2) s c / z,  dz/da = a s^2 / z,  dz/db = b c^2 / z
 #     (all zero when the floor clamps, matching the graph's max() grad)
 _MODEL_VJP_TAIL = """
-    float ds0dz, ds0dr, ds2dz, ds2dr;
-    if (m_comp) {
-        ds0dr = -2.0f * MP_PI * r;
-        ds0dz = 0.0f;
-        ds2dr = -4.0f * MP_PI * r + 8.0f * MP_PI * r * (r2 + z2);
-        ds2dz = 8.0f * MP_PI * z * r2;
-    } else {
-        ds0dr = -2.0f * r * kap0;
-        ds0dz = kite / z;
-        ds2dr = -4.0f * r * kap0 + 8.0f * r * ((r2 + z2) * kap0 - kite);
-        ds2dz = 2.0f * kite / z
-              + (2.0f / z) * (4.0f * z2 * r2 * kap0
-                              - (1.0f + r2 + z2) * kite);
-    }
-    float ds1dz, ds1dr;
-    if (m_ps) {
-        float sqbr = metal::precise::sqrt(z * r);
-        ds1dr = -2.0f * r * onembmr2 * Em / sqbr;
-        ds1dz = (2.0f / 3.0f) * r * onembmr2 * (2.0f * E_ - Em) / sqbr;
-    } else {
-        float sq1 = metal::precise::sqrt(onembmr2);
-        ds1dr = -4.0f * r * sq1 * E_;
-        ds1dz = -(4.0f / 3.0f) * r * sq1 * (E_ - 2.0f * Em);
-    }
+PHOT_PARTIALS
     float ctv = ct[i];
     float dFdz = (gc0 * ds0dz + gc1 * ds1dz + gc2 * ds2dz) * inv_norm;
     float dzdphi, dzda, dzdb;
@@ -442,6 +458,212 @@ _MODEL_VJP_SRC_SIMD = _model_src(
     _MODEL_VJP_TAIL.replace("VJP_STORE", _VJP_STORE_SIMD),
 )
 
+# ---------------------------------------------------------------------------
+# v3: eccentric model kernel — the transit-anchored orbit (anchored.py)
+# folded in beside the photometric core.
+# ---------------------------------------------------------------------------
+
+# Per-chain orbit constants, packed into one (n, NORB) array so the
+# kernel stays well inside Metal's buffer budget. Order is fixed by
+# _ORB_COLS and shared with anchored.pack_orbit_constants.
+_ORB_COLS = ("ecw", "esw", "es", "ec", "b1", "a2", "b2",
+             "ecc", "e0", "mtra", "ci")
+NORB = len(_ORB_COLS)
+
+_ORBIT_ECC = """
+    uint x = thread_position_in_grid.x;
+    uint y = thread_position_in_grid.y;
+    if (x >= (uint)npts) return;
+    uint i = y * (uint)npts + x;
+
+    float dt = xdat[x];
+    float kk = xdat[(uint)npts + x];
+    float pof = poff[y];
+    float P = pref + pof;
+    float tau = dt - (t0off[y] + kk * pof);
+    float n_w = metal::rint(tau / P);
+    tau -= P * n_w;
+    float phi = MP_TWO_PI * tau / P;
+
+    uint ob = y * NORB_C;
+    float o_ecw = orb[ob + 0u];
+    float o_esw = orb[ob + 1u];
+    float o_es  = orb[ob + 2u];
+    float o_ec  = orb[ob + 3u];
+    float o_b1  = orb[ob + 4u];
+    float o_a2  = orb[ob + 5u];
+    float o_b2  = orb[ob + 6u];
+    float o_e   = orb[ob + 7u];
+    float o_E0  = orb[ob + 8u];
+    float o_Mt  = orb[ob + 9u];
+    float o_ci  = orb[ob + 10u];
+
+    // fold the STANDARD mean anomaly; carry phi along with the fold so
+    // the anchored residual below stays consistent with it.
+    float Mm = phi + o_Mt;
+    float n_m = metal::rint(Mm / MP_TWO_PI);
+    float M_w = Mm - MP_TWO_PI * n_m;
+    float phi_w = phi - MP_TWO_PI * n_m;
+
+    // Markley starter on |M| (~1e-4): its own cancellation against E0 is
+    // irrelevant at that accuracy, and the refinement below runs wholly
+    // in the anchored, O(e)-conditioned coefficients.
+    float sgn = (M_w >= 0.0f) ? 1.0f : -1.0f;
+    float Ma = fabs(M_w);
+    float ome = 1.0f - o_e;
+    float M2 = Ma * Ma;
+    float alph = MP_MK_A + MP_MK_B * (MP_PI - Ma) / (1.0f + o_e);
+    float dstn = 3.0f * ome + alph * o_e;
+    float alphad = alph * dstn;
+    float rstn = (3.0f * alphad * (dstn - ome) + M2) * Ma;
+    float qstn = 2.0f * alphad * ome - M2;
+    float q2stn = qstn * qstn;
+    float cstn = fabs(rstn)
+               + metal::precise::sqrt(max(q2stn * qstn + rstn * rstn, 1e-30f));
+    float wstn = MP_CBRT2(cstn);
+    float d0 = (2.0f * rstn * wstn / (wstn * wstn + wstn * qstn + q2stn)
+                + Ma) / dstn * sgn - o_E0;
+
+    float sd = metal::precise::sin(d0);      // the ONLY trig call
+    float cd = metal::precise::cos(d0);
+    float omc = (cd > 0.0f) ? (sd * sd / (1.0f + cd)) : (1.0f - cd);
+    float fa0 = d0 + o_es * omc - o_ec * sd - phi_w;
+    float fa1 = 1.0f + o_es * sd - o_ec * cd;    // = 1 - e cos E > 0
+    float fa2 = o_es * cd + o_ec * sd;           // = e sin E
+    float fa3 = -o_es * sd + o_ec * cd;          // = e cos E
+    float c3 = -fa0 / (fa1 - 0.5f * fa0 * fa2 / fa1);
+    float c4 = -fa0 / (fa1 + 0.5f * c3 * fa2 + c3 * c3 * fa3 / 6.0f);
+    float dcorr = -fa0 / (fa1 + 0.5f * c4 * fa2 + c4 * c4 * fa3 / 6.0f
+                          - c4 * c4 * c4 * fa2 / 24.0f);
+    float dc2 = dcorr * dcorr;
+    float sdd = dcorr * (1.0f - dc2 / 6.0f * (1.0f - dc2 / 20.0f));
+    float cdd = 1.0f - dc2 * 0.5f * (1.0f - dc2 / 12.0f);
+    float sind = sd * cdd + cd * sdd;
+    float cosd = cd * cdd - sd * sdd;
+    float omcf = (cosd > 0.0f) ? (sind * sind / (1.0f + cosd))
+                               : (1.0f - cosd);
+
+    float r = rin[y];
+    float av = ain[y];
+    float uu = av * (-o_ecw * omcf - o_b1 * sind);
+    float vv = av * (o_a2 * cosd - o_b2 * sind - o_esw);
+    float vc = vv * o_ci;
+    float z2o = uu * uu + vc * vc;
+    float z = metal::precise::sqrt(max(z2o, KITE_FLOOR));
+    if (vv <= 0.0f || z >= 1.0f + r) { ORBIT_EXIT }
+
+    float u1 = u1in[y];
+    float u2 = u2in[y];
+"""
+
+
+def _model_src_ecc(exit_stores: str, tail: str) -> str:
+    return _subst(_ORBIT_ECC.replace("ORBIT_EXIT", exit_stores) + _PHOT
+                  + tail).replace("NORB_C", f"{NORB}u").replace(
+                      "MP_CBRT2", _CBRT2)
+
+# cbrt(c)^2 for the Markley starter. E2 replaces precise::powr (~220x a
+# multiply, ~20% of orbit time) with a bit-trick + Newton cbrt.
+_CBRT2 = "mp_cbrt2"
+
+_ECC_FWD_SRC = _model_src_ecc("out[i] = 0.0f; return;",
+                              "    out[i] = fdev;\n")
+
+#: per-point gradient slots emitted by the v3 VJP, in output order
+_ECC_GRAD_SLOTS = ("t0", "p", "r", "a", "u1", "u2",
+                   "ecw", "esw", "es", "ec", "b1", "a2", "b2", "ci")
+NGRAD = len(_ECC_GRAD_SLOTS)
+
+# Transit-anchored chain rules. With gu = u/z, gv = v ci^2 / z:
+#   du/ddelta = a (-ecw sin d - b1 cos d)      [d(1-cos d)/dd = sin d]
+#   dv/ddelta = a (-a2 sin d - b2 cos d)
+#   dz/ddelta = gu du/ddelta + gv dv/ddelta
+#   D = dg/ddelta = 1 + es sin d - ec cos d = 1 - e cos E > 0, so the
+#   implicit rule gives ddelta/dphi = 1/D, ddelta/des = -(1-cos d)/D,
+#   ddelta/dec = sin d / D.
+# The tail is linear in each anchored coefficient, so
+#   dz/decw = -gu a (1-cos d),  dz/desw = -gv a,
+#   dz/db1  = -gu a sin d,      dz/da2  =  gv a cos d,
+#   dz/db2  = -gv a sin d,      dz/dci  =  v^2 ci / z,
+#   dz/da   =  z / a            (exact: z is homogeneous of degree 1 in a)
+# and the phi wrap chains are the circular kernel's, verbatim.
+# ecc / e0 / mtra seed only the starter and the 2-pi fold, whose exact
+# gradient contribution is zero (implicit function theorem; rint locally
+# constant) — they are detached in anchored.pack_orbit_constants.
+_ECC_VJP_TAIL = """
+PHOT_PARTIALS
+    float ctv = ct[i];
+    float dFdz = (gc0 * ds0dz + gc1 * ds1dz + gc2 * ds2dz) * inv_norm;
+    float ctz = ctv * dFdz;
+
+    float p_r  = ctv * (gc0 * ds0dr + gc1 * ds1dr + gc2 * ds2dr) * inv_norm;
+    float p_u1 = ctv * ((s1d - s0d) * inv_norm
+                        + fdev * (MP_PI / 3.0f) * inv_norm);
+    float p_u2 = ctv * ((-1.5f * s0d + 2.0f * s1d - 0.25f * s2d) * inv_norm
+                        + fdev * (MP_PI / 6.0f) * inv_norm);
+
+    float p_t0 = 0.0f, p_p = 0.0f, p_a = 0.0f, p_ci = 0.0f;
+    float p_ecw = 0.0f, p_esw = 0.0f, p_es = 0.0f, p_ec = 0.0f;
+    float p_b1 = 0.0f, p_a2 = 0.0f, p_b2 = 0.0f;
+    if (z2o > KITE_FLOOR) {
+        float gu = uu / z;
+        float gv = vc * o_ci / z;
+        float dud = av * (-o_ecw * sind - o_b1 * cosd);
+        float dvd = av * (-o_a2 * sind - o_b2 * cosd);
+        float dzdd = gu * dud + gv * dvd;
+        float Dk = 1.0f + o_es * sind - o_ec * cosd;
+        float dzdphi = dzdd / Dk;
+        p_t0  = ctz * dzdphi * (-MP_TWO_PI / P);
+        p_p   = ctz * dzdphi
+                * (MP_TWO_PI * ((-kk - n_w) * P - tau) / (P * P));
+        p_a   = ctz * (z / av);
+        p_ci  = ctz * (vv * vv * o_ci / z);
+        p_ecw = ctz * gu * (-av * omcf);
+        p_esw = ctz * gv * (-av);
+        p_b1  = ctz * gu * (-av * sind);
+        p_a2  = ctz * gv * (av * cosd);
+        p_b2  = ctz * gv * (-av * sind);
+        p_es  = ctz * dzdd * (-omcf / Dk);
+        p_ec  = ctz * dzdd * (sind / Dk);
+    }
+
+    p_t0  = metal::simd_sum(p_t0);
+    p_p   = metal::simd_sum(p_p);
+    p_r   = metal::simd_sum(p_r);
+    p_a   = metal::simd_sum(p_a);
+    p_u1  = metal::simd_sum(p_u1);
+    p_u2  = metal::simd_sum(p_u2);
+    p_ecw = metal::simd_sum(p_ecw);
+    p_esw = metal::simd_sum(p_esw);
+    p_es  = metal::simd_sum(p_es);
+    p_ec  = metal::simd_sum(p_ec);
+    p_b1  = metal::simd_sum(p_b1);
+    p_a2  = metal::simd_sum(p_a2);
+    p_b2  = metal::simd_sum(p_b2);
+    p_ci  = metal::simd_sum(p_ci);
+    if (metal::simd_is_first()) {
+        uint ngrp = ((uint)npts + 31u) / 32u;
+        uint o = y * NGRAD_C * ngrp + x / 32u;
+        gpart[o +  0u * ngrp] = p_t0;
+        gpart[o +  1u * ngrp] = p_p;
+        gpart[o +  2u * ngrp] = p_r;
+        gpart[o +  3u * ngrp] = p_a;
+        gpart[o +  4u * ngrp] = p_u1;
+        gpart[o +  5u * ngrp] = p_u2;
+        gpart[o +  6u * ngrp] = p_ecw;
+        gpart[o +  7u * ngrp] = p_esw;
+        gpart[o +  8u * ngrp] = p_es;
+        gpart[o +  9u * ngrp] = p_ec;
+        gpart[o + 10u * ngrp] = p_b1;
+        gpart[o + 11u * ngrp] = p_a2;
+        gpart[o + 12u * ngrp] = p_b2;
+        gpart[o + 13u * ngrp] = p_ci;
+    }
+"""
+
+_ECC_VJP_SRC = _model_src_ecc("return;", _ECC_VJP_TAIL).replace(
+    "NGRAD_C", f"{NGRAD}u")
+
 _kernels: dict = {}
 _metal_ok: bool | None = None
 
@@ -463,6 +685,74 @@ def _get_kernels():
             source=_VJP_SRC,
         )
     return _kernels
+
+
+def _get_ecc_kernels():
+    if "ecc_fwd" not in _kernels:
+        _kernels["ecc_fwd"] = mx.fast.metal_kernel(
+            name="mp_ecc_fwd",
+            input_names=["xdat", "t0off", "poff", "rin", "ain", "orb",
+                         "u1in", "u2in", "pref", "npts"],
+            output_names=["out"],
+            header=_HEADER,
+            source=_ECC_FWD_SRC,
+        )
+        _kernels["ecc_vjp"] = mx.fast.metal_kernel(
+            name="mp_ecc_vjp",
+            input_names=["xdat", "t0off", "poff", "rin", "ain", "orb",
+                         "u1in", "u2in", "ct", "pref", "npts"],
+            output_names=["gpart"],
+            header=_HEADER,
+            source=_ECC_VJP_SRC,
+        )
+    return _kernels
+
+
+def make_ecc_core_metal(period_ref: float):
+    """v3 eccentric model kernel: (x, t0_off, p_off, r, a, orb, u1, u2)
+    -> flux deviation (n, m).
+
+    ``orb`` is the (n, 11) packed transit-anchored orbit constants from
+    ``anchored.pack_orbit_constants``; everything that maps sampler
+    coordinates onto those constants stays in the MLX graph, so its
+    Jacobian rides ordinary autodiff and only the per-point solve and
+    photometry are fused here.
+    """
+    pref = float(period_ref)
+
+    @mx.custom_function
+    def core(x2d, t0_off, p_off, r, a, orb, u1, u2):
+        n = t0_off.shape[0]
+        m = x2d.shape[1]
+        k = _get_ecc_kernels()["ecc_fwd"]
+        return k(inputs=[x2d, t0_off, p_off, r, a, orb, u1, u2, pref,
+                         int(m)],
+                 output_shapes=[(n, m)], output_dtypes=[mx.float32],
+                 grid=(m, n, 1), threadgroup=(256, 1, 1))[0]
+
+    @core.vjp
+    def core_vjp(primals, cotangent, output):
+        x2d, t0_off, p_off, r, a, orb, u1, u2 = primals
+        ct = cotangent if isinstance(cotangent, mx.array) else cotangent[0]
+        n = t0_off.shape[0]
+        m = x2d.shape[1]
+        cols = (m + 31) // 32
+        k = _get_ecc_kernels()["ecc_vjp"]
+        part = k(inputs=[x2d, t0_off, p_off, r, a, orb, u1, u2, ct, pref,
+                         int(m)],
+                 output_shapes=[(n, NGRAD, cols)],
+                 output_dtypes=[mx.float32], init_value=0.0,
+                 grid=(m, n, 1), threadgroup=(256, 1, 1))[0]
+        g = mx.sum(part, axis=2)                      # (n, NGRAD)
+        # scatter the orbit slots back into (n, NORB); the three starter
+        # columns (ecc, e0, mtra) are exactly zero by construction.
+        g_orb = mx.zeros((n, NORB), dtype=g.dtype)
+        idx = mx.array([_ORB_COLS.index(c) for c in _ECC_GRAD_SLOTS[6:]])
+        g_orb[:, idx] = g[:, 6:]
+        return (mx.zeros_like(x2d), g[:, 0], g[:, 1], g[:, 2], g[:, 3],
+                g_orb, g[:, 4], g[:, 5])
+
+    return core
 
 
 def _get_model_kernels():
