@@ -136,6 +136,26 @@ wrong:
    contract. (Casting the finished fp32 sum to float64 recovers
    nothing.)
 
+### Sampling the eccentric model: what to expect
+
+Two findings from the reference run (`examples/chees_ecc.py`, measured
+by `benchmarks/v3_ecc_sampling_geometry.py`), both about the *posterior*
+rather than the model:
+
+1. **Give it a long warmup.** ChEES produced ~1% divergences at 200
+   warmup iterations and exactly zero at 400-600. They are a
+   step-size-adaptation artefact. They are *not* the constraint barrier:
+   removing it leaves the divergence count bit-identical, and it is
+   active in 0.000% of the samples drawn.
+2. **Budget for slow mixing.** Transit photometry constrains a
+   *combination* of (a, b, e, w) through the transit duration, so the
+   posterior is a curved, strongly correlated ridge that a diagonal mass
+   matrix crawls along. At 256 chains x (400 warmup + 400 samples) the
+   circular 8-parameter problem reaches R-hat 1.46; the 10-parameter
+   eccentric one reaches 3.53, improving from 5.54 at 100 samples — slow
+   mixing, not a trap. Truth is recovered within 1 sigma on all ten
+   parameters either way.
+
 ### Custom Metropolis / anything else
 
 Same principle: propose for all chains, stack into (n_chains, ndim),

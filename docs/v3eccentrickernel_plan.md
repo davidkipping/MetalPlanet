@@ -15,7 +15,19 @@ number below reproduces from a script in `benchmarks/`.
 > | E2 cheap cbrt | E1 gates held | 1.54x -> **1.41x**, cbrt 1.7e-6 |
 > | E3 eccentric VJP | all chains vs fp64, <= 2x circular | **1.38x**, 902x the graph path |
 > | E4 anvil target | no unphysical state finite-and-unpenalized | `ecc_constraint_penalty` + gate tests |
-> | E5 eccentric ChEES | zero divergences, truth recovered | see CHANGELOG 0.3.0 |
+> | E5 eccentric ChEES | zero divergences, truth recovered | zero at warmup >= 400; truth within 1 sigma on all 10 |
+>
+> E5 also produced a finding the plan did not ask for. The first run
+> showed ~1% divergences and R-hat ~4, so the barrier was the obvious
+> suspect — and an A/B eliminated it outright: divergence counts are
+> bit-identical with the barrier removed, and it is active in 0.000% of
+> the samples drawn (chains reach e = 0.26 against e_max = 0.875). The
+> divergences are a step-size-adaptation artefact that vanishes with a
+> longer warmup. What remains is slow mixing on the (a, b, e, w)
+> duration ridge: at 256 chains x (400 + 400) the circular 8-parameter
+> control reaches R-hat 1.46 and the eccentric one 3.53, improving from
+> 5.54 at 100 samples. Reproduced by
+> `benchmarks/v3_ecc_sampling_geometry.py`.
 >
 > Two real bugs were found *by building the gates*, both the same class
 > and both in code this plan introduced: a floored denominator in

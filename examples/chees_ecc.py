@@ -7,8 +7,24 @@ degrading, so it is the honest test of the transit-anchored solve the
 v3 kernel is built on (see metalplanet/anchored.py and
 benchmarks/v3_kh_grad_conditioning.py).
 
-Success = zero divergences, truth recovered within a few sigma, and a
-respectable ESS/s on the 10-parameter problem.
+Success = zero divergences and truth recovered within a few sigma.
+
+Two things this script had to learn the hard way, both measured by
+benchmarks/v3_ecc_sampling_geometry.py:
+
+  * **Warmup matters more here than in the circular problem.** At 200
+    warmup iterations ChEES produced ~1% divergences; at 400-600 it
+    produces none. They were a step-size-adaptation artefact, not a bad
+    gradient — and *not* the constraint barrier, whose removal leaves the
+    divergence count bit-identical and which is active in 0.000% of the
+    samples drawn.
+  * **The 10-parameter posterior mixes slowly.** Transit photometry
+    constrains a combination of (a, b, e, w) through the duration, so the
+    posterior is a curved, strongly correlated ridge. At 256 chains x
+    (400 + 400) the circular 8-parameter problem reaches R-hat 1.46 while
+    this one reaches 3.53 — falling as sampling continues (5.54 at 100
+    samples), i.e. slow mixing rather than a trap. Budget accordingly, or
+    reach for a mass matrix that knows about the correlations.
 """
 
 import math
@@ -36,7 +52,7 @@ print(engine.validate_precision(tt.target, u0[:32]), "\n", flush=True)
 
 kernel = engine.ChEESHMC(tt.target, max_leapfrog=24)
 t0 = time.perf_counter()
-res = engine.run(kernel, tt.target, u0, n_warmup=200, n_samples=100,
+res = engine.run(kernel, tt.target, u0, n_warmup=600, n_samples=200,
                  seed=1, reanchor_every=100, progress=10)
 wall = time.perf_counter() - t0
 
