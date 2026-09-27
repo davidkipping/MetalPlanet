@@ -138,3 +138,65 @@ class TestDifferentiability:
             g = mx.grad(f)(mx.array(0.11, dtype=mx.float64))
             assert bool(mx.isfinite(g))
             assert float(g) < 0.0  # bigger planet, less flux
+
+
+class TestEccentricKernelRouting:
+    """The fp32 GPU eccentric primary path is served by the v3 kernel;
+    every other combination keeps the graph. Parity is adjudicated
+    against float64, since both fp32 paths sit at the same rounding."""
+
+    @staticmethod
+    def _model(ecc, dtype, kernel=True, n=20001, **kw):
+        import metalplanet.api as api
+        p, _ = _params(ecc=ecc, w=63.0)
+        t = np.linspace(-0.35, 0.35, n)
+        orig = api.TransitModel._ecc_kernel_usable
+        if not kernel:
+            api.TransitModel._ecc_kernel_usable = lambda self: False
+        try:
+            return metalplanet.TransitModel(p, t, dtype=dtype, **kw), p
+        finally:
+            api.TransitModel._ecc_kernel_usable = orig
+
+    @pytest.mark.parametrize("ecc", [1e-4, 0.3, 0.7, 0.9])
+    def test_kernel_matches_graph_and_fp64(self, ecc):
+        mk, p = self._model(ecc, mx.float32, kernel=True)
+        mg, _ = self._model(ecc, mx.float32, kernel=False)
+        a, b = mk.light_curve(p), mg.light_curve(p)
+        with mx.stream(mx.cpu):
+            m64, _ = self._model(ecc, mx.float64)
+            ref = m64.light_curve(p)
+        assert np.abs(a - b).max() < 5e-6
+        # the kernel must be no worse than the graph against fp64
+        assert np.abs(a - ref).max() < 3.0 * max(np.abs(b - ref).max(), 5e-7)
+
+    def test_period_update_is_not_baked_in(self):
+        """period_ref is 0 and the period rides the traced p_off input,
+        so a batman-style parameter update must change the curve."""
+        mk, p = self._model(0.3, mx.float32, n=4001)
+        f1 = mk.light_curve(p)
+        p.per = 3.5
+        f2 = mk.light_curve(p)
+        assert not np.allclose(f1, f2)
+        p.per = 3.456
+        with mx.stream(mx.cpu):
+            m64, _ = self._model(0.3, mx.float64, n=4001)
+            m64.t = mk.t
+            ref = m64.light_curve(p)
+        assert np.abs(mk.light_curve(p) - ref).max() < 5e-6
+
+    def test_fp64_and_secondary_do_not_use_the_kernel(self):
+        m64, _ = self._model(0.3, mx.float64, n=101)
+        assert not m64._ecc_kernel_usable()
+        p, _ = _params(ecc=0.3, w=63.0)
+        p.fp = 0.002
+        msec = metalplanet.TransitModel(
+            p, np.linspace(-0.35, 0.35, 101), transittype="secondary",
+            dtype=mx.float32)
+        assert not msec._ecc_kernel_usable()
+
+    def test_use_metal_false_disables_it(self):
+        p, _ = _params(ecc=0.3, w=63.0)
+        m = metalplanet.TransitModel(p, np.linspace(-0.35, 0.35, 101),
+                                     dtype=mx.float32, use_metal=False)
+        assert not m._ecc_kernel_usable()

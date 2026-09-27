@@ -42,6 +42,19 @@ target. Plan, gates and review log: `docs/v3eccentrickernel_plan.md`.
   samples an improper posterior.
 - `examples/chees_ecc.py`: eccentric ChEES-HMC injection-recovery at a
   deliberately low truth (e = 0.02), where the parameterization matters.
+  1024 chains, 600 warmup + 200 samples: **zero divergences**, truth
+  recovered within 1σ on all ten parameters. The 10-parameter posterior
+  mixes far more slowly than the circular one (R-hat 3.5 vs 1.5 for the
+  circular control at matched 256 chains × 400+400) — the well-known
+  (a, b, e, ω) transit-duration degeneracy, not a model defect.
+  `benchmarks/v3_ecc_sampling_geometry.py` reproduces the diagnosis,
+  including the A/B that eliminates the constraint barrier as the cause
+  of the divergences seen at shorter warmups.
+- The batman-style frontend routes its fp32 GPU *eccentric* primary
+  transits through the v3 kernel: 2.1x at N = 1e7, 1.5x at 1e6, 1.2x at
+  1e5 on `light_curve()`. The period is carried by the kernel's traced
+  `p_off` input (with `period_ref = 0`) so batman-style parameter
+  updates never see a baked-in constant.
 - Benchmarks: `bench_ecc_kernel.py`, `v3_reduction_spike.py`,
   `v3_kh_grad_conditioning.py`, `v3_ecc_graph_baseline.py`; the VJP
   profiler now A/Bs both reduction strategies.

@@ -192,6 +192,16 @@ class TransitModel:
         fp = 0.0 if params.fp is None else float(params.fp)
         return self._photom(z, front, float(params.rp), u1, u2, fp)
 
+    def _ecc_kernel_usable(self) -> bool:
+        """The v3 kernel serves the fp32 GPU *primary*-transit path only;
+        fp64, CPU streams and secondary eclipses keep the graph."""
+        if not self.use_metal or self.transittype != "primary":
+            return False
+        if self.dtype != mx.float32:
+            return False
+        from .metal import _gpu_stream_active, metal_available
+        return metal_available() and _gpu_stream_active()
+
     def _get_compiled(self, circular: bool):
         fn = self._compiled.get(circular)
         if fn is not None:
@@ -205,6 +215,33 @@ class TransitModel:
                 z = mx.sqrt(mx.maximum((a * sphi) ** 2 + (b * cphi) ** 2,
                                        1e-24))
                 return self._photom(z, cphi > 0.0, rp, u1, u2, fp)
+        elif self._ecc_kernel_usable():
+            # Whole eccentric model in one kernel. The anchored Kepler
+            # solve as graph ops streams a lot of intermediates: measured
+            # 0.23 Gpt/s against the kernel's 2.3, so this is ~10x at
+            # large N (the circular branch above is already within 1.4x
+            # of its kernel and is left alone).
+            #
+            # period_ref is baked into the kernel factory as a constant,
+            # which would defeat batman-style parameter updates — so it
+            # is set to zero and the period is carried by the *traced*
+            # p_off input instead. With the epoch column k = 0 that is
+            # exactly equivalent, gradients included: the kernel's
+            # dphi/dp_off = 2 pi ((-k - n_w) P - tau_w) / P^2 reduces to
+            # dphi/dP for k = 0.
+            from .anchored import pack_orbit_constants
+            from .metal import make_ecc_core_metal
+            core = make_ecc_core_metal(0.0)
+            m = t.shape[0]
+            xdat = mx.stack([t, mx.zeros_like(t)])
+
+            def raw(t0, per, a, k, h, ci, rp, u1, u2, fp):
+                def col(v):
+                    return mx.reshape(v, (1,))
+                orb = pack_orbit_constants(col(k), col(h), col(ci))
+                dev = core(xdat, col(t0), col(per), col(rp), col(a), orb,
+                           col(u1), col(u2))
+                return 1.0 + mx.reshape(dev, (m,))
         else:
             # transit-anchored: phi is measured straight from t0, so no
             # mean-anomaly-at-transit offset is needed, and float32 stays
@@ -258,5 +295,14 @@ class TransitModel:
 
     def light_curve_mx(self, params) -> mx.array:
         """Supersampled-grid flux as an MLX array (stays in the graph;
-        no averaging applied) — for building differentiable pipelines."""
+        no averaging applied) — for building differentiable pipelines.
+
+        Note this is the *eager* path: unlike ``light_curve`` it does not
+        go through the mx.compile'd graph or the fused kernels, because
+        it must accept MLX scalars for parameters rather than the Python
+        floats those paths trace. Expect roughly an order of magnitude
+        less throughput at large N; for bulk evaluation use
+        ``light_curve``, and for a sampler use ``metalplanet.anvil``
+        (see docs/sampler-integration.md).
+        """
         return self._eval(params)
