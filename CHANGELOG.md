@@ -15,6 +15,14 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 - `docs/v3eccentrickernel_plan.md`: combined implementation plan
   (milestones E0–E5) for the v3 eccentric fused kernel and the
   two-stage in-kernel VJP reduction, targeting v0.3.0.
+  Revision 2 (2026-09-27) folds in an adversarial review: the
+  reduction needs no predicated exits/barrier (`simd_sum` over active
+  lanes is verified and specified), so E0 is decoupled; the
+  (√e cos ω, √e sin ω) fp32 gradient noise floor (5% at e=1e-5) is
+  addressed by a transit-anchored formulation or an e floor; joint
+  physical constraints get a q_e reparameterization + barrier; gates
+  are re-pinned to the circular kernel (graph eccentric baseline:
+  567 ms fwd / 68.6 s value+grad). Scripts: `benchmarks/v3_*.py`.
 - `docs/MLXtransit_prompt.md`: the founding project prompt, preserved
   from the retired MLXtransit working folder.
 
