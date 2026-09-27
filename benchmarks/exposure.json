@@ -1,0 +1,77 @@
+{
+ "reference_agreement": 8.68382210583718e-09,
+ "rows": [
+  {
+   "method": "supersample",
+   "n": 3,
+   "evals": 3,
+   "max_err": 0.000739822107679533
+  },
+  {
+   "method": "supersample",
+   "n": 7,
+   "evals": 7,
+   "max_err": 0.0002776622697806541
+  },
+  {
+   "method": "supersample",
+   "n": 11,
+   "evals": 11,
+   "max_err": 0.00016811447337883312
+  },
+  {
+   "method": "supersample",
+   "n": 31,
+   "evals": 31,
+   "max_err": 5.717792317616599e-05
+  },
+  {
+   "method": "supersample",
+   "n": 101,
+   "evals": 101,
+   "max_err": 1.7302146145148356e-05
+  },
+  {
+   "method": "supersample",
+   "n": 1001,
+   "evals": 1001,
+   "max_err": 1.7356280238578492e-06
+  },
+  {
+   "method": "supersample",
+   "n": 10001,
+   "evals": 10001,
+   "max_err": 1.7362282089816716e-07
+  },
+  {
+   "method": "contact_gl",
+   "n": 2,
+   "evals": 10,
+   "max_err": 7.2172652872959375e-06
+  },
+  {
+   "method": "contact_gl",
+   "n": 3,
+   "evals": 15,
+   "max_err": 9.160141102304564e-07
+  },
+  {
+   "method": "contact_gl",
+   "n": 5,
+   "evals": 25,
+   "max_err": 8.894663161562733e-08
+  },
+  {
+   "method": "contact_gl",
+   "n": 7,
+   "evals": 35,
+   "max_err": 1.8143418212268614e-08
+  },
+  {
+   "method": "contact_gl",
+   "n": 11,
+   "evals": 55,
+   "max_err": 2.0013265489282617e-09
+  }
+ ]
+}

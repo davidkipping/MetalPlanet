@@ -140,6 +140,35 @@ core. The eccentric model has its own anvil target
 (`make_ecc_transit_flux`, 10 parameters) — see the sampler guide for the
 joint-constraint barrier it requires.
 
+## Limb darkening and finite exposures
+
+`limb_dark="polynomial"` takes `u = [u_1 ... u_N]` at **any** order for
+I(mu)/I0 = 1 - sum u_n (1-mu)^n, via ALFM19's M_n recursion
+(`metalplanet/poly.py`), validated against 40-digit mpmath direct
+integration: 1e-15 at N = 8, 2e-13 at N = 16. The coefficients stay
+traced, so they can change between calls on a built model and the limb
+darkening itself is differentiable. (batman's *non*-polynomial laws —
+nonlinear, squareroot, logarithmic — are outside this formulation.)
+
+For finite exposures, `integration="contact"` replaces uniform
+supersampling with Gauss-Legendre quadrature on windows **split at the
+contact times**, which is ALFM19's recipe. The light curve's derivative
+jumps where the planet's limb crosses the star's, so uniform sampling
+converges only as O(1/N); splitting removes the kinks and each smooth
+piece then converges geometrically (`benchmarks/bench_exposure.py`, a
+29-minute exposure on a 0.126 d transit):
+
+| method | evaluations per exposure | max abs error |
+|---|---:|---:|
+| supersample N=101 | 101 | 1.7e-5 |
+| supersample N=10,001 | 10,001 | 1.7e-7 |
+| **contact GL n=5** | **25** | **8.9e-8** |
+| contact GL n=11 | 55 | 2.0e-9 |
+
+Matching the 25-evaluation result with uniform supersampling would take
+N ~ 19,500 — about 780x the model evaluations. `supersample_factor`
+remains the default for batman parity.
+
 ## Numerical notes worth knowing
 
 * Regime selection is `mx.where` masks with *both-branch sanitization*:

@@ -50,6 +50,7 @@ from .flux import flux_dev
 from .metal import flux_dev_metal
 from .anchored import separation_anchored
 from .poly import flux_dev_poly
+from .exposure import contact_offsets, exposure_nodes
 from .solution import sn_dev
 from .trig import sincos
 
@@ -102,6 +103,15 @@ def _ld_coeffs(params) -> tuple[float, float]:
         "outside the ALFM19 formulation.")
 
 
+def _unpack_ld(poly, tail):
+    """(u1, u2, uvec, fp) from the trailing limb-darkening + fp args."""
+    if poly:
+        uv, fp = tail
+        return None, None, uv, fp
+    u1, u2, fp = tail
+    return u1, u2, None, fp
+
+
 class TransitModel:
     """Precomputes the (super)sampled time grid; ``light_curve(params)``
     evaluates the model for (possibly updated) parameters, batman-style.
@@ -121,7 +131,8 @@ class TransitModel:
 
     def __init__(self, params, t, transittype: str = "primary",
                  supersample_factor: int = 1, exp_time: float = 0.0,
-                 dtype=None, use_metal: bool = True):
+                 dtype=None, use_metal: bool = True,
+                 integration: str = "supersample", n_gl: int = 7):
         _ld_coeffs(params)  # validate law/coefficients early
         if transittype not in ("primary", "secondary"):
             raise ValueError("transittype must be 'primary' or 'secondary'")
@@ -129,6 +140,15 @@ class TransitModel:
             raise ValueError("secondary eclipse needs params.fp")
         if supersample_factor > 1 and exp_time <= 0.0:
             raise ValueError("supersampling needs exp_time > 0")
+        if integration not in ("supersample", "contact"):
+            raise ValueError('integration must be "supersample" or "contact"')
+        if integration == "contact":
+            if exp_time <= 0.0:
+                raise ValueError("contact integration needs exp_time > 0")
+            if transittype != "primary":
+                raise ValueError("contact integration is primary-transit only")
+        self.integration = integration
+        self.n_gl = int(n_gl)
         self.transittype = transittype
         self.limb_dark = params.limb_dark
         self._n_poly = (len(list(params.u))
@@ -143,7 +163,7 @@ class TransitModel:
         self.t = t
         self.supersample_factor = int(supersample_factor)
         self.exp_time = float(exp_time)
-        if self.supersample_factor > 1:
+        if self.supersample_factor > 1 and integration == "supersample":
             n = self.supersample_factor
             # batman convention: endpoint-inclusive uniform samples
             offs = np.linspace(-0.5 * self.exp_time, 0.5 * self.exp_time, n)
@@ -235,7 +255,46 @@ class TransitModel:
 
         poly = bool(self._n_poly)
 
-        if circular and poly:
+        if self.integration == "contact":
+            # Node times depend on the parameters (the contacts move), so
+            # the grid is rebuilt inside the compiled graph each call and
+            # `t` stays the exposure mid-times.
+            n_gl = self.n_gl
+            ex = self.exp_time
+
+            def _avg(z, front, rp, u1, u2, fp, uv, w):
+                f = self._photom(z, front, rp, u1, u2, fp, uvec=uv)
+                return mx.sum(f * w, axis=1)
+
+            if circular:
+                def raw(t0, per, a, b, rp, *ld_fp):
+                    u1, u2, uv, fp = _unpack_ld(poly, ld_fp)
+                    ci = b / a
+                    cs = contact_offsets(rp, a, b)
+                    T, W = exposure_nodes(t, t0, per, ex, cs, n_gl,
+                                          dtype=self.dtype)
+                    phase = (2.0 * math.pi) * (T - t0) / per
+                    sphi, cphi = sincos(phase)
+                    z = mx.sqrt(mx.maximum((a * sphi) ** 2 + (b * cphi) ** 2,
+                                           1e-24))
+                    return _avg(z, cphi > 0.0, rp, u1, u2, fp, uv, W)
+            else:
+                def raw(t0, per, a, k, h, ci, rp, *ld_fp):
+                    u1, u2, uv, fp = _unpack_ld(poly, ld_fp)
+                    e = k * k + h * h
+                    sq = mx.sqrt(mx.maximum(e, 1e-30))
+                    esw = h * sq                      # e sin w
+                    beta = mx.sqrt(mx.maximum(1.0 - e * e, 1e-30))
+                    r_c = a * (1.0 - e * e) / (1.0 + esw)   # sep. at conj.
+                    a_sky = a * (1.0 + esw) / beta
+                    cs = contact_offsets(rp, a_sky, r_c * ci)
+                    T, W = exposure_nodes(t, t0, per, ex, cs, n_gl,
+                                          dtype=self.dtype)
+                    phi = (2.0 * math.pi) * (T - t0) / per
+                    z, front = separation_anchored(phi, k, h, a, ci)
+                    return _avg(z, front, rp, u1, u2, fp, uv, W)
+
+        elif circular and poly:
             def raw(t0, per, a, b, rp, uv, fp):
                 phase = (2.0 * math.pi) * (t - t0) / per
                 sphi, cphi = sincos(phase)
@@ -331,8 +390,10 @@ class TransitModel:
                 out = np.array(f, dtype=np.float64)
         else:
             out = np.array(self._eval_compiled(params), dtype=np.float64)
-        if self.supersample_factor > 1:
-            out = out.reshape(self.t.size, self.supersample_factor).mean(axis=1)
+        if (self.supersample_factor > 1
+                and self.integration == "supersample"):
+            out = out.reshape(self.t.size,
+                              self.supersample_factor).mean(axis=1)
         return out
 
     def light_curve_mx(self, params) -> mx.array:

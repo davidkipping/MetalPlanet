@@ -3,6 +3,44 @@
 All notable changes to MetalPlanet. Versioning: semantic-ish
 (MAJOR.MINOR.PATCH); every release is tagged `vX.Y.Z` in git.
 
+## [0.4.0] — 2026-09-27
+
+Closes the two remaining optional items from the original M6 list
+(arbitrary order, exposure-time integration) and gives the cross-code
+benchmark an eccentric half.
+
+### Added
+- **Arbitrary-order polynomial limb darkening**, `limb_dark="polynomial"`
+  with `u = [u_1 ... u_N]` for any N (`metalplanet/poly.py`). ALFM19's
+  three-term M_n recursion seeded by closed forms for M_0..M_3, then
+  s_n = -(2 r² M_n - n/(n+2)[(1-r²-z²) M_n + sqarea M_{n-2}]). Validated
+  against a 40-digit mpmath direct integration sharing no code with it:
+  1e-15 at N = 8, 2e-13 at N = 16, 3e-9 even at N = 30 (the upward
+  recursion loses ~1 digit per 2 orders; Limbdark.jl's downward
+  series-seeded variant is documented but unnecessary at any order a
+  physical law uses). Non-polynomial laws remain unsupported — they are
+  outside the ALFM19 formulation, and the error now says so.
+- `greens_affine()` writes the u → g map as the affine map it is, so the
+  coefficients stay **traced**: they can change between calls on a built
+  model (the batman workflow) and the limb darkening is differentiable.
+- **Contact-split exposure integration**, `integration="contact"`
+  (`metalplanet/exposure.py`). The light curve's derivative jumps at each
+  contact, so uniform supersampling converges only as O(1/N). Splitting
+  the exposure window at the contacts and applying a fixed-order
+  Gauss-Legendre rule to each smooth piece converges geometrically:
+  25 evaluations per exposure reach 8.9e-8 where supersampling needs
+  N ~ 19,500 — ~780x fewer model evaluations
+  (`benchmarks/bench_exposure.py`). Fixed order rather than Limbdark's
+  adaptive Simpson, because adaptive depth is data-dependent control
+  flow and would break batching and `mx.compile`; the five-interval split
+  is branchless, so grazing and full transits share one code path and the
+  node positions stay differentiable.
+- **Eccentric cross-code benchmarks**: `RESULTS.md` now compares all five
+  codes at e = 0.3 on precision and orbit-inclusive speed, each solving
+  Kepler's equation itself. MetalPlanet fp64 is the most accurate
+  (4.4e-16, tied with exoplanet-core) and its fp32 GPU path the fastest
+  past N ~ 1e5 (15.3 ms at 10^7 points vs 207 ms for the next code).
+
 ## [0.3.0] — 2026-09-27
 
 The eccentric release: eccentric orbits now run on the fused Metal
