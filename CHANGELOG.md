@@ -3,6 +3,25 @@
 All notable changes to MetalPlanet. Versioning: semantic-ish
 (MAJOR.MINOR.PATCH); every release is tagged `vX.Y.Z` in git.
 
+## [0.4.1] — 2026-09-27
+
+Two defects in 0.4.0's new exposure code, found by a closing audit.
+
+### Fixed
+- `light_curve_mx` returned the *instantaneous* flux at the exposure
+  mid-times under `integration="contact"` while `light_curve` returned
+  the averaged one — a silent ~1e-3 discrepancy on the entry point
+  documented for differentiable pipelines. The eager path now performs
+  the same contact-split average (they agree to 2e-16).
+  `supersample_factor` still returns the raw supersampled grid, which is
+  its documented behaviour.
+- Contact-split quadrature weights are renormalised. The clamped
+  sub-interval widths summed to the exposure only to ~1e-14, so
+  out-of-transit flux came back as 1 + 2e-14 rather than 1 to round-off,
+  breaking the exact-unity contract kept everywhere else. The weights are
+  a partition of unity by construction, so this removes round-off and
+  nothing else: now 1 ulp, convergence figures unchanged.
+
 ## [0.4.0] — 2026-09-27
 
 Closes the two remaining optional items from the original M6 list
@@ -40,17 +59,6 @@ benchmark an eccentric half.
   Kepler's equation itself. MetalPlanet fp64 is the most accurate
   (4.4e-16, tied with exoplanet-core) and its fp32 GPU path the fastest
   past N ~ 1e5 (15.3 ms at 10^7 points vs 207 ms for the next code).
-
-### Fixed
-- `light_curve_mx` silently returned the *instantaneous* flux at the
-  exposure mid-times under `integration="contact"` while `light_curve`
-  returned the averaged one — a ~1e-3 discrepancy on the entry point
-  documented for differentiable pipelines. The eager path now averages
-  too. (`supersample_factor` still returns the raw supersampled grid,
-  which is its documented behaviour.)
-- Contact-split quadrature weights are renormalised: the clamped
-  sub-interval widths summed to the exposure only to ~1e-14, leaving
-  out-of-transit flux at 1 + 2e-14 instead of 1 to round-off.
 
 ## [0.3.0] — 2026-09-27
 
