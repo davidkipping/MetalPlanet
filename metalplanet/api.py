@@ -24,8 +24,11 @@ Differences from batman, by design:
   ALFM19 formulation (float64 accuracy ~1e-13; batman's quadratic path
   carries a ~2e-8 floor from its Hastings E/K approximations), and the
   whole computation is an MLX graph — differentiable and GPU-capable;
-* supported limb_dark: "uniform", "linear", "quadratic" (arbitrary-order
-  polynomial and nonlinear laws are roadmap);
+* supported limb_dark: "uniform", "linear", "quadratic", and
+  "polynomial" for I(mu)/I0 = 1 - sum_n u_n (1-mu)^n at ANY order
+  (ALFM19's M_n recursion, metalplanet/poly.py); batman's
+  non-polynomial laws ("nonlinear", "squareroot", ...) are not
+  covered by this formulation;
 * no error-tolerance machinery (`max_err`, `fac`, `nthreads`): the model
   is closed-form, there is no integration error to budget.
 
@@ -46,12 +49,13 @@ import numpy as np
 from .flux import flux_dev
 from .metal import flux_dev_metal
 from .anchored import separation_anchored
+from .poly import flux_dev_poly
 from .solution import sn_dev
 from .trig import sincos
 
 __all__ = ["TransitParams", "TransitModel"]
 
-_SUPPORTED_LD = ("uniform", "linear", "quadratic")
+_SUPPORTED_LD = ("uniform", "linear", "quadratic", "polynomial")
 
 
 class TransitParams:
@@ -87,9 +91,15 @@ def _ld_coeffs(params) -> tuple[float, float]:
         if len(u) != 2:
             raise ValueError("quadratic limb darkening takes 2 coefficients")
         return float(u[0]), float(u[1])
+    if law == "polynomial":
+        if len(u) == 0:
+            raise ValueError("polynomial limb darkening needs >= 1 "
+                             "coefficient (use 'uniform' for none)")
+        return None, None          # handled by the polynomial core
     raise ValueError(
-        f"limb_dark {law!r} not supported; choose from {_SUPPORTED_LD} "
-        "(arbitrary-order polynomial laws are on the roadmap)")
+        f"limb_dark {law!r} not supported; choose from {_SUPPORTED_LD}. "
+        "Non-polynomial laws (nonlinear, squareroot, logarithmic) are "
+        "outside the ALFM19 formulation.")
 
 
 class TransitModel:
@@ -121,6 +131,8 @@ class TransitModel:
             raise ValueError("supersampling needs exp_time > 0")
         self.transittype = transittype
         self.limb_dark = params.limb_dark
+        self._n_poly = (len(list(params.u))
+                        if params.limb_dark == "polynomial" else 0)
         self.dtype = mx.float64 if dtype is None else dtype
         self._stream = mx.cpu if self.dtype == mx.float64 else None
         # fused Metal kernel for fp32 GPU evaluation (falls back on its
@@ -176,9 +188,12 @@ class TransitModel:
                                    mx.array(float(params.a), dtype=self.dtype),
                                    mx.array(math.cos(inc), dtype=self.dtype))
 
-    def _photom(self, z, front, rp, u1, u2, fp):
+    def _photom(self, z, front, rp, u1, u2, fp, uvec=None):
         if self.transittype == "primary":
             z_eff = mx.where(front, z, 2.0 + z)
+            if uvec is not None:          # arbitrary-order polynomial law
+                return 1.0 + flux_dev_poly(z_eff, rp, uvec,
+                                           n_max=self._n_poly)
             core = flux_dev_metal if self.use_metal else flux_dev
             return 1.0 + core(z_eff, rp, u1, u2)
         z_eff = mx.where(front, 2.0 + z, z)
@@ -186,16 +201,26 @@ class TransitModel:
         # visible fraction of the (uniform) planet disk
         return 1.0 + fp * (1.0 + s0d / (math.pi * rp * rp))
 
+    def _uvec(self, params):
+        """Traced coefficient vector for the polynomial law (else None)."""
+        if not self._n_poly:
+            return None
+        return mx.array(np.asarray(list(params.u), dtype=np.float64),
+                        dtype=self.dtype)
+
     def _eval(self, params) -> mx.array:
         u1, u2 = _ld_coeffs(params)
         z, front = self._separation(params)
         fp = 0.0 if params.fp is None else float(params.fp)
-        return self._photom(z, front, float(params.rp), u1, u2, fp)
+        return self._photom(z, front, float(params.rp), u1, u2, fp,
+                            uvec=self._uvec(params))
 
     def _ecc_kernel_usable(self) -> bool:
         """The v3 kernel serves the fp32 GPU *primary*-transit path only;
         fp64, CPU streams and secondary eclipses keep the graph."""
         if not self.use_metal or self.transittype != "primary":
+            return False
+        if self._n_poly:            # the v3 kernel is quadratic-only
             return False
         if self.dtype != mx.float32:
             return False
@@ -208,7 +233,22 @@ class TransitModel:
             return fn
         t = self._t_mx
 
-        if circular:
+        poly = bool(self._n_poly)
+
+        if circular and poly:
+            def raw(t0, per, a, b, rp, uv, fp):
+                phase = (2.0 * math.pi) * (t - t0) / per
+                sphi, cphi = sincos(phase)
+                z = mx.sqrt(mx.maximum((a * sphi) ** 2 + (b * cphi) ** 2,
+                                       1e-24))
+                return self._photom(z, cphi > 0.0, rp, None, None, fp,
+                                    uvec=uv)
+        elif poly:
+            def raw(t0, per, a, k, h, ci, rp, uv, fp):
+                phi = (2.0 * math.pi) * (t - t0) / per
+                z, front = separation_anchored(phi, k, h, a, ci)
+                return self._photom(z, front, rp, None, None, fp, uvec=uv)
+        elif circular:
             def raw(t0, per, a, b, rp, u1, u2, fp):
                 phase = (2.0 * math.pi) * (t - t0) / per
                 sphi, cphi = sincos(phase)
@@ -264,16 +304,18 @@ class TransitModel:
         def s(x):
             return mx.array(float(x), dtype=self.dtype)
 
+        ld = ((self._uvec(params),) if self._n_poly
+              else (s(u1), s(u2)))
         if ecc == 0.0:
             a = float(params.a)
             return self._get_compiled(True)(
                 s(params.t0), s(params.per), s(a), s(a * math.cos(inc)),
-                s(params.rp), s(u1), s(u2), s(fp))
+                s(params.rp), *ld, s(fp))
         w = math.radians(float(params.w))
         return self._get_compiled(False)(
             s(params.t0), s(params.per), s(params.a),
             s(math.sqrt(ecc) * math.cos(w)), s(math.sqrt(ecc) * math.sin(w)),
-            s(math.cos(inc)), s(params.rp), s(u1), s(u2), s(fp))
+            s(math.cos(inc)), s(params.rp), *ld, s(fp))
 
     # -- batman-compatible surface ----------------------------------------
 

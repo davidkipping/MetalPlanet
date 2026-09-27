@@ -15,6 +15,7 @@ import math
 import numpy as np
 
 __all__ = [
+    "greens_affine",
     "greens_transform_np",
     "quad_g_coeffs",
     "quad_norm",
@@ -59,3 +60,25 @@ def quad_g_coeffs(u1, u2):
 def quad_norm(u1, u2):
     """pi (g0 + 2 g1 / 3) = pi (1 - u1/3 - u2/6): the unocculted flux."""
     return math.pi * (1.0 - u1 / 3.0 - u2 / 6.0)
+
+
+def greens_affine(n: int):
+    """(A, c) with g = A @ u + c — the u -> g map written as the affine
+    map it is, so the g_n can be built from *traced* coefficients.
+
+    ``greens_transform_np`` bakes u in as float64 host constants, which
+    is right for a fixed law but breaks the batman workflow of varying
+    u between calls on one compiled model. The transform is linear in u
+    (the -1 prepended to the coefficient vector supplies the constant
+    part), so the columns are recovered exactly by evaluating it on the
+    unit vectors. Returns float64 arrays of shape (n+1, n) and (n+1,).
+    """
+    n = int(n)
+    zero_u = np.zeros(n, dtype=np.float64)
+    c = greens_transform_np(zero_u)
+    A = np.empty((c.size, n), dtype=np.float64)
+    for j in range(n):
+        e = np.zeros(n, dtype=np.float64)
+        e[j] = 1.0
+        A[:, j] = greens_transform_np(e) - c
+    return A, c
