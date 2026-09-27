@@ -9,6 +9,11 @@ with open(os.path.join(HERE, "precision.json")) as f:
     prec = json.load(f)
 with open(os.path.join(HERE, "speed.json")) as f:
     speed = json.load(f)
+prec_ecc = []
+_pe = os.path.join(HERE, "precision_ecc.json")
+if os.path.exists(_pe):
+    with open(_pe) as f:
+        prec_ecc = json.load(f)
 
 lines = []
 add = lines.append
@@ -20,7 +25,9 @@ add("Machine: Apple M2 Max (12 CPU cores: 8P+4E; one 30-core GPU), "
     "macOS, MLX GPU fp32 / CPU fp64.\n")
 add("Scenario: quadratic limb-darkened primary transit "
     "(P=3.456 d, a/R*=8.8, b=0.45, Rp/R*=0.1, u=[0.40, 0.25]), "
-    "241-point precision grid, N-point speed sweeps.\n")
+    "241-point precision grid, N-point speed sweeps. The eccentric "
+    "sections repeat the comparison at e=0.3, w=63 deg with b held at "
+    "0.45 at inferior conjunction.\n")
 
 add("\n## Precision vs mpmath direct-integration oracle (30 digits)\n")
 add("| code | max |err| | median |err| |")
@@ -29,6 +36,16 @@ for r in sorted(prec, key=lambda r: r["max_err"]):
     add(f"| {r['code']} | {r['max_err']:.2e} | {r['median_err']:.2e} |")
 add("\n`ellc` excluded: its PyPI wheel ships an x86_64-only binary "
     "(incompatible with arm64) and source builds need gfortran.\n")
+
+if prec_ecc:
+    add("\n## Precision, eccentric orbit (e = 0.3, w = 63 deg)\n")
+    add("Every code solves Kepler's equation itself; the oracle's "
+        "separation comes from an independent float64 Newton solver, so "
+        "no code under test defines the geometry it is judged against.\n")
+    add("| code | max |err| | median |err| |")
+    add("|---|---:|---:|")
+    for r in sorted(prec_ecc, key=lambda r: r["max_err"]):
+        add(f"| {r['code']} | {r['max_err']:.2e} | {r['median_err']:.2e} |")
 
 add("\n## Single light curve: wall time vs N (median)\n")
 codes = sorted({(r["code"], r["threads"]) for r in speed
@@ -44,6 +61,25 @@ for code, threads in codes:
                     and r["n"] == n and "error" not in r), None)
         row.append("—" if rec is None else f"{rec['median_s']*1e3:,.2f} ms")
     add("| " + " | ".join(row) + " |")
+
+if any(r["mode"] == "ecc" for r in speed):
+    add("\n## Eccentric light curve: wall time vs N (median)\n")
+    add("Orbit-inclusive: each code's own Kepler solver is inside the "
+        "timed region.\n")
+    codes_e = sorted({(r["code"], r["threads"]) for r in speed
+                      if r["mode"] == "ecc" and "error" not in r})
+    ns_e = sorted({r["n"] for r in speed if r["mode"] == "ecc"})
+    add("| code (threads) | " + " | ".join(f"N={n:,}" for n in ns_e) + " |")
+    add("|---|" + "---:|" * len(ns_e))
+    for code, threads in codes_e:
+        row = [f"{code} ({'all' if threads == 0 else threads})"]
+        for n in ns_e:
+            rec = next((r for r in speed if r["mode"] == "ecc"
+                        and r["code"] == code and r["threads"] == threads
+                        and r["n"] == n and "error" not in r), None)
+            row.append("—" if rec is None
+                       else f"{rec['median_s']*1e3:,.2f} ms")
+        add("| " + " | ".join(row) + " |")
 
 add("\n## Native batch: 512 parameter sets x 100,000 points\n")
 add("| code | wall | curves/s | notes |")
@@ -88,6 +124,16 @@ if os.path.exists(bs_path):
         "size on 12 cores.\n")
 
 add("""
+## The eccentric comparison in one line
+
+Every code above solves Kepler's equation inside the timed region. At
+float64 MetalPlanet ties exoplanet-core for the most accurate eccentric
+light curve (4e-16 vs the independent mpmath oracle); at float32 on the
+GPU it is the fastest past N ~ 1e5, reaching 15.3 ms at 10^7 points
+against 207 ms for the next-fastest CPU code. Below ~10^4 points the
+GPU dispatch floor dominates and the CPU codes win — the same crossover
+documented for the circular case.
+
 ## What the speed tables do not show
 
 Only MetalPlanet and jaxoplanet are differentiable, and only MetalPlanet

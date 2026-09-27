@@ -36,6 +36,16 @@ SINGLE = [
 ]
 BATCH = ["metalplanet_gpu", "pytransit", "jaxoplanet", "batman",
          "exoplanet"]
+# eccentric sweep: same codes, each solving Kepler's equation itself, so
+# the numbers include the orbit as well as the photometry.
+ECC_CODES = [
+    ("metalplanet_fp32", [0]),
+    ("metalplanet_fp64", [0]),
+    ("batman", [1]),
+    ("pytransit", THREADS),
+    ("exoplanet", [1]),
+    ("jaxoplanet", [0]),
+]
 
 SLOW_SKIP_S = 20.0  # skip larger N once a code's median exceeds this
 
@@ -89,6 +99,24 @@ def main():
                 save(rows)
                 med = rec.get("median_s")
                 print(f"{code:>18s} single n={n:>9d} threads={threads}: "
+                      f"{med if med is None else f'{med*1e3:10.2f} ms'} "
+                      f"{rec.get('error', '')[:60]}", flush=True)
+                if rec.get("error") or (med and med > SLOW_SKIP_S):
+                    slow = True
+
+    for code, thread_list in ECC_CODES:
+        for threads in thread_list:
+            slow = False
+            for n in N_SWEEP:
+                if have(rows, code=code, mode="ecc", n=n, threads=threads):
+                    continue
+                if slow:
+                    break
+                rec = run_one(code, "ecc", n, threads)
+                rows.append(rec)
+                save(rows)
+                med = rec.get("median_s")
+                print(f"{code:>18s}    ecc n={n:>9d} threads={threads}: "
                       f"{med if med is None else f'{med*1e3:10.2f} ms'} "
                       f"{rec.get('error', '')[:60]}", flush=True)
                 if rec.get("error") or (med and med > SLOW_SKIP_S):

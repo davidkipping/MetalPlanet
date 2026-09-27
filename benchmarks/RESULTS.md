@@ -4,7 +4,7 @@
 
 Machine: Apple M2 Max (12 CPU cores: 8P+4E; one 30-core GPU), macOS, MLX GPU fp32 / CPU fp64.
 
-Scenario: quadratic limb-darkened primary transit (P=3.456 d, a/R*=8.8, b=0.45, Rp/R*=0.1, u=[0.40, 0.25]), 241-point precision grid, N-point speed sweeps.
+Scenario: quadratic limb-darkened primary transit (P=3.456 d, a/R*=8.8, b=0.45, Rp/R*=0.1, u=[0.40, 0.25]), 241-point precision grid, N-point speed sweeps. The eccentric sections repeat the comparison at e=0.3, w=63 deg with b held at 0.45 at inferior conjunction.
 
 
 ## Precision vs mpmath direct-integration oracle (30 digits)
@@ -23,6 +23,19 @@ Scenario: quadratic limb-darkened primary transit (P=3.456 d, a/R*=8.8, b=0.45, 
 `ellc` excluded: its PyPI wheel ships an x86_64-only binary (incompatible with arm64) and source builds need gfortran.
 
 
+## Precision, eccentric orbit (e = 0.3, w = 63 deg)
+
+Every code solves Kepler's equation itself; the oracle's separation comes from an independent float64 Newton solver, so no code under test defines the geometry it is judged against.
+
+| code | max |err| | median |err| |
+|---|---:|---:|
+| metalplanet fp64 | 4.44e-16 | 0.00e+00 |
+| exoplanet-core | 5.55e-16 | 0.00e+00 |
+| jaxoplanet (order=10) | 4.64e-09 | 0.00e+00 |
+| batman | 5.40e-08 | 6.29e-10 |
+| metalplanet fp32(GPU) | 1.26e-07 | 1.08e-09 |
+| pytransit (exact) | 2.86e-07 | 5.39e-10 |
+
 ## Single light curve: wall time vs N (median)
 
 | code (threads) | N=1,000 | N=10,000 | N=100,000 | N=1,000,000 | N=10,000,000 |
@@ -36,6 +49,22 @@ Scenario: quadratic limb-darkened primary transit (P=3.456 d, a/R*=8.8, b=0.45, 
 | pytransit (4) | 0.04 ms | 0.36 ms | 3.55 ms | 35.71 ms | 359.28 ms |
 | pytransit (8) | 0.04 ms | 0.36 ms | 3.59 ms | 35.76 ms | 358.83 ms |
 | pytransit (12) | 0.04 ms | 0.36 ms | 3.54 ms | 35.81 ms | 359.70 ms |
+
+## Eccentric light curve: wall time vs N (median)
+
+Orbit-inclusive: each code's own Kepler solver is inside the timed region.
+
+| code (threads) | N=1,000 | N=10,000 | N=100,000 | N=1,000,000 | N=10,000,000 |
+|---|---:|---:|---:|---:|---:|
+| batman (1) | 0.02 ms | 0.19 ms | 2.05 ms | 20.36 ms | 207.14 ms |
+| exoplanet (1) | 0.07 ms | 0.53 ms | 5.60 ms | 62.09 ms | 635.40 ms |
+| jaxoplanet (all) | 0.19 ms | 0.94 ms | 3.64 ms | 34.62 ms | 343.93 ms |
+| metalplanet_fp32 (all) | 0.42 ms | 1.09 ms | 1.20 ms | 2.27 ms | 15.31 ms |
+| metalplanet_fp64 (all) | 0.62 ms | 2.14 ms | 17.88 ms | 172.20 ms | 1,740.08 ms |
+| pytransit (1) | 0.04 ms | 0.38 ms | 3.99 ms | 40.48 ms | 394.62 ms |
+| pytransit (4) | 0.04 ms | 0.39 ms | 3.77 ms | 39.84 ms | 403.05 ms |
+| pytransit (8) | 0.05 ms | 0.41 ms | 4.05 ms | 40.12 ms | 398.46 ms |
+| pytransit (12) | 0.04 ms | 0.38 ms | 3.77 ms | 39.90 ms | 397.85 ms |
 
 ## Native batch: 512 parameter sets x 100,000 points
 
@@ -60,6 +89,16 @@ Scenario: quadratic limb-darkened primary transit (P=3.456 d, a/R*=8.8, b=0.45, 
 
 With the fused model-level Metal kernel (orbit + photometry in one register-resident pass, ~12 B/pt of memory traffic) the GPU streams ~55,000 curves/s flat to npv = 4096 with no memory cliff. PyTransit's numba batch streams ~1,950 curves/s at every size on 12 cores.
 
+
+## The eccentric comparison in one line
+
+Every code above solves Kepler's equation inside the timed region. At
+float64 MetalPlanet ties exoplanet-core for the most accurate eccentric
+light curve (4e-16 vs the independent mpmath oracle); at float32 on the
+GPU it is the fastest past N ~ 1e5, reaching 15.3 ms at 10^7 points
+against 207 ms for the next-fastest CPU code. Below ~10^4 points the
+GPU dispatch floor dominates and the CPU codes win — the same crossover
+documented for the circular case.
 
 ## What the speed tables do not show
 

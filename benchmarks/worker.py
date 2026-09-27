@@ -25,13 +25,15 @@ def main():
     max_reps = int(sys.argv[4]) if len(sys.argv) > 4 else 15
     nthreads = int(os.environ.get("BENCH_NTHREADS", "1"))
 
-    if mode == "single":
+    if mode in ("single", "ecc"):
+        suffix = "_ecc" if mode == "ecc" else ""
         if code == "batman":
-            state = adapters.batman_prepare(n, nthreads=nthreads)
-            run = adapters.batman_run
+            state = getattr(adapters, f"batman{suffix}_prepare")(
+                n, nthreads=nthreads)
+            run = getattr(adapters, f"batman{suffix}_run")
         else:
-            state = getattr(adapters, f"{code}_prepare")(n)
-            run = getattr(adapters, f"{code}_run")
+            state = getattr(adapters, f"{code}{suffix}_prepare")(n)
+            run = getattr(adapters, f"{code}{suffix}_run")
     elif mode == "batch":
         state = getattr(adapters, f"{code}_batch_prepare")()
         run = getattr(adapters, f"{code}_batch_run")

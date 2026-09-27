@@ -22,8 +22,10 @@ import math
 
 import numpy as np
 
-from scenario import (A_RS, B_IMPACT, INC_DEG, PER, RP, T0, U1, U2,
-                      batch_params, time_grid, z_of_t)
+from scenario import (A_RS, B_IMPACT, ECC, INC_DEG, INC_ECC_DEG,
+                      OMEGA_DEG, PER, RP, T0, U1, U2, batch_params,
+                      mean_anomaly_at_transit, time_grid, time_grid_ecc,
+                      z_of_t, z_of_t_ecc)
 
 
 # ---------------------------------------------------------------------------
@@ -281,3 +283,134 @@ def jaxoplanet_batch_prepare(_n=None):
 def jaxoplanet_batch_run(state):
     f, args = state
     return np.asarray(f(*args).block_until_ready())
+
+
+# ---------------------------------------------------------------------------
+# Eccentric variants. Every code solves Kepler's equation itself here, so
+# these measure the orbit solver as well as the photometry — exoplanet-core
+# and jaxoplanet through their own kepler() (which return (sin f, cos f)),
+# batman / PyTransit / MetalPlanet through their normal orbital-element
+# interfaces.
+# ---------------------------------------------------------------------------
+
+_W_RAD = math.radians(OMEGA_DEG)
+_COSI_ECC = math.cos(math.radians(INC_ECC_DEG))
+
+
+def _mp_params_ecc():
+    import metalplanet
+    p = metalplanet.TransitParams()
+    p.t0, p.per, p.rp, p.a, p.inc = T0, PER, RP, A_RS, INC_ECC_DEG
+    p.ecc, p.w, p.u, p.limb_dark = ECC, OMEGA_DEG, [U1, U2], "quadratic"
+    return p
+
+
+def metalplanet_fp64_ecc_prepare(n):
+    import metalplanet
+    p = _mp_params_ecc()
+    m = metalplanet.TransitModel(p, time_grid_ecc(n))
+    m.light_curve(p)
+    return (m, p)
+
+
+def metalplanet_fp64_ecc_run(state):
+    m, p = state
+    return m.light_curve(p)
+
+
+def metalplanet_fp32_ecc_prepare(n):
+    import mlx.core as mx
+    import metalplanet
+    p = _mp_params_ecc()
+    m = metalplanet.TransitModel(p, time_grid_ecc(n), dtype=mx.float32)
+    m.light_curve(p)
+    return (m, p)
+
+
+def metalplanet_fp32_ecc_run(state):
+    m, p = state
+    return m.light_curve(p)
+
+
+def batman_ecc_prepare(n, nthreads=1):
+    import batman
+    p = batman.TransitParams()
+    p.t0, p.per, p.rp, p.a, p.inc = T0, PER, RP, A_RS, INC_ECC_DEG
+    p.ecc, p.w, p.u, p.limb_dark = ECC, OMEGA_DEG, [U1, U2], "quadratic"
+    m = batman.TransitModel(p, time_grid_ecc(n), nthreads=nthreads)
+    m.light_curve(p)
+    return (m, p)
+
+
+def batman_ecc_run(state):
+    m, p = state
+    return m.light_curve(p)
+
+
+def pytransit_ecc_prepare(n, interpolate=False):
+    from pytransit import QuadraticModel
+    tm = QuadraticModel(interpolate=interpolate)
+    tm.set_data(time_grid_ecc(n))
+    kw = dict(k=RP, ldc=[U1, U2], t0=T0, p=PER, a=A_RS,
+              i=math.radians(INC_ECC_DEG), e=ECC, w=_W_RAD)
+    tm.evaluate(**kw)
+    return (tm, kw)
+
+
+def pytransit_ecc_run(state):
+    tm, kw = state
+    return np.asarray(tm.evaluate(**kw))
+
+
+def _xo_z_ecc(t):
+    """Separation from exoplanet-core's OWN Kepler solver."""
+    from exoplanet_core.numpy import ops
+    M = 2.0 * np.pi * (t - T0) / PER + mean_anomaly_at_transit()
+    sinf, cosf = ops.kepler(np.ascontiguousarray(M),
+                            np.full_like(M, ECC))
+    r_orb = A_RS * (1.0 - ECC ** 2) / (1.0 + ECC * cosf)
+    swf = math.sin(_W_RAD) * cosf + math.cos(_W_RAD) * sinf
+    z = r_orb * np.sqrt(np.maximum(
+        1.0 - swf ** 2 * (1.0 - _COSI_ECC ** 2), 0.0))
+    return np.where(swf > 0.0, z, 2.0 + z)
+
+
+def exoplanet_ecc_prepare(n):
+    t = time_grid_ecc(n)
+    _xo_flux(_xo_z_ecc(t[:16]), RP, U1, U2)
+    return t
+
+
+def exoplanet_ecc_run(t):
+    return _xo_flux(_xo_z_ecc(t), RP, U1, U2)
+
+
+def jaxoplanet_ecc_prepare(n, order=10):
+    import jax
+    import jax.numpy as jnp
+    from jaxoplanet.core import kepler
+    from jaxoplanet.core.limb_dark import light_curve
+    jax.config.update("jax_enable_x64", True)
+    u = jnp.array([U1, U2])
+    t = jnp.asarray(time_grid_ecc(n))
+    m_tra = mean_anomaly_at_transit()
+    sw, cw = math.sin(_W_RAD), math.cos(_W_RAD)
+
+    @jax.jit
+    def f(t_):
+        M = 2.0 * jnp.pi * (t_ - T0) / PER + m_tra
+        sinf, cosf = kepler(M, ECC)
+        r_orb = A_RS * (1.0 - ECC ** 2) / (1.0 + ECC * cosf)
+        swf = sw * cosf + cw * sinf
+        z = r_orb * jnp.sqrt(jnp.maximum(
+            1.0 - swf ** 2 * (1.0 - _COSI_ECC ** 2), 0.0))
+        z = jnp.where(swf > 0.0, z, 2.0 + z)
+        return 1.0 + light_curve(u, z, RP, order=order)
+
+    f(t).block_until_ready()
+    return (f, t)
+
+
+def jaxoplanet_ecc_run(state):
+    f, t = state
+    return np.asarray(f(t).block_until_ready())
