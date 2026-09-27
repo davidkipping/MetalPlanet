@@ -26,13 +26,18 @@ frontend measures 9.3 ms (`benchmarks/speed.json`), not the ~2 ms the
 naive formula suggests. Use the formula for orders of magnitude and the
 benchmark JSONs for budgets.
 
-The rule itself is three orders of magnitude, measured
+The rule itself is worth two to three orders of magnitude, measured
 (`verify_doc_claims.py`, 10,000 parameter sets × 1,000-point curve):
 
 | strategy | wall time | per curve |
 |---|---:|---:|
-| 10,000 separate calls (Python loop) | ~2,900 ms | ~290 µs |
-| ONE batched call | 2.9 ms | 290 ns |
+| 10,000 separate calls (Python loop) | ~2,000 ms | ~200 µs |
+| ONE batched call | ~3.5 ms | ~350 ns |
+
+The ratio itself moves with machine state — repeated runs of that script
+land anywhere from ~580x to ~1000x, because the looped side is dominated
+by per-dispatch overhead that thermal and buffer-cache conditions shift.
+Treat the *order* as the claim, not the digits.
 
 A per-walker loop turns MetalPlanet into the slowest code in the
 benchmark; a batched call makes it the fastest. If a dispatch carries
