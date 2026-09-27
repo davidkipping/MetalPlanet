@@ -1,59 +1,59 @@
 {
- "reference_agreement": 8.68382210583718e-09,
+ "reference_agreement": 8.683822327881785e-09,
  "rows": [
   {
    "method": "supersample",
    "n": 3,
    "evals": 3,
-   "max_err": 0.000739822107679533
+   "max_err": 0.0007398221076796441
   },
   {
    "method": "supersample",
    "n": 7,
    "evals": 7,
-   "max_err": 0.0002776622697806541
+   "max_err": 0.00027766226978076514
   },
   {
    "method": "supersample",
    "n": 11,
    "evals": 11,
-   "max_err": 0.00016811447337883312
+   "max_err": 0.00016811447337905516
   },
   {
    "method": "supersample",
    "n": 31,
    "evals": 31,
-   "max_err": 5.717792317616599e-05
+   "max_err": 5.7177923176388035e-05
   },
   {
    "method": "supersample",
    "n": 101,
    "evals": 101,
-   "max_err": 1.7302146145148356e-05
+   "max_err": 1.730214614525938e-05
   },
   {
    "method": "supersample",
    "n": 1001,
    "evals": 1001,
-   "max_err": 1.7356280238578492e-06
+   "max_err": 1.7356280239688715e-06
   },
   {
    "method": "supersample",
    "n": 10001,
    "evals": 10001,
-   "max_err": 1.7362282089816716e-07
+   "max_err": 1.7362282100918947e-07
   },
   {
    "method": "contact_gl",
    "n": 2,
    "evals": 10,
-   "max_err": 7.2172652872959375e-06
+   "max_err": 7.21726528740696e-06
   },
   {
    "method": "contact_gl",
    "n": 3,
    "evals": 15,
-   "max_err": 9.160141102304564e-07
+   "max_err": 9.160141101194341e-07
   },
   {
    "method": "contact_gl",
@@ -65,7 +65,7 @@
    "method": "contact_gl",
    "n": 7,
    "evals": 35,
-   "max_err": 1.8143418212268614e-08
+   "max_err": 1.8143418656357824e-08
   },
   {
    "method": "contact_gl",

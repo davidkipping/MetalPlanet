@@ -115,4 +115,11 @@ def exposure_nodes(t, t0, period, exp_time, contacts, n_gl: int,
         halfw = 0.5 * (hi - lo)
         times.append(mid[:, None] + halfw[:, None] * xg[None, :])
         weights.append(halfw[:, None] * wg[None, :] * inv_dt)
-    return mx.concatenate(times, axis=1), mx.concatenate(weights, axis=1)
+    W = mx.concatenate(weights, axis=1)
+    # The sub-interval widths sum to the exposure only up to rounding in
+    # the clamped edges, which left the out-of-transit flux at 1 + 2e-14
+    # instead of exactly 1. Renormalising restores that contract (the
+    # weights are a partition of unity by construction, so this only
+    # removes round-off).
+    W = W / mx.sum(W, axis=1, keepdims=True)
+    return mx.concatenate(times, axis=1), W

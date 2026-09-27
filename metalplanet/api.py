@@ -183,14 +183,37 @@ class TransitModel:
     # Python-level dispatch on ecc == 0) selects between two graphs,
     # built lazily and cached per model.
 
-    def _separation(self, params):
-        """(z, front) over the supersampled grid, in the model dtype
-        (eager; used by light_curve_mx and tests)."""
+    def _contact_nodes(self, params):
+        """(times, weights) for the contact-split exposure rule, eager."""
+        a = float(params.a)
+        ci = math.cos(math.radians(float(params.inc)))
+        ecc = float(params.ecc)
+        if ecc == 0.0:
+            a_sky, b = a, a * ci
+        else:
+            w = math.radians(float(params.w))
+            esw = ecc * math.sin(w)
+            beta = math.sqrt(max(1.0 - ecc * ecc, 1e-30))
+            a_sky = a * (1.0 + esw) / beta
+            b = a * (1.0 - ecc * ecc) / (1.0 + esw) * ci
+
+        def s(x):
+            return mx.array(float(x), dtype=self.dtype)
+
+        cs = contact_offsets(s(params.rp), s(a_sky), s(b))
+        return exposure_nodes(self._t_mx, s(params.t0), s(params.per),
+                              s(self.exp_time), cs, self.n_gl,
+                              dtype=self.dtype)
+
+    def _separation(self, params, t=None):
+        """(z, front) over the supersampled grid (or an explicit time
+        array), in the model dtype (eager; used by light_curve_mx and
+        tests)."""
         per = float(params.per)
         t0 = float(params.t0)
         ecc = float(params.ecc)
         inc = math.radians(float(params.inc))
-        t = self._t_mx
+        t = self._t_mx if t is None else t
         if ecc == 0.0:
             phase = (2.0 * math.pi / per) * (t - t0)
             sphi, cphi = sincos(phase)
@@ -230,10 +253,20 @@ class TransitModel:
 
     def _eval(self, params) -> mx.array:
         u1, u2 = _ld_coeffs(params)
-        z, front = self._separation(params)
         fp = 0.0 if params.fp is None else float(params.fp)
+        uvec = self._uvec(params)
+        if self.integration == "contact":
+            # the eager path must average too, or light_curve_mx would
+            # quietly return the INSTANTANEOUS flux at the exposure
+            # mid-times while light_curve returns the averaged one
+            T, W = self._contact_nodes(params)
+            z, front = self._separation(params, T)
+            f = self._photom(z, front, float(params.rp), u1, u2, fp,
+                             uvec=uvec)
+            return mx.sum(f * W, axis=1)
+        z, front = self._separation(params)
         return self._photom(z, front, float(params.rp), u1, u2, fp,
-                            uvec=self._uvec(params))
+                            uvec=uvec)
 
     def _ecc_kernel_usable(self) -> bool:
         """The v3 kernel serves the fp32 GPU *primary*-transit path only;
@@ -407,5 +440,10 @@ class TransitModel:
         less throughput at large N; for bulk evaluation use
         ``light_curve``, and for a sampler use ``metalplanet.anvil``
         (see docs/sampler-integration.md).
+
+        With ``integration="contact"`` the exposure average *is* applied
+        here, so the result matches ``light_curve`` one-for-one. With
+        ``supersample_factor`` it is not: that mode returns the raw
+        supersampled grid, as the summary line says.
         """
         return self._eval(params)

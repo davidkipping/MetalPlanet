@@ -60,7 +60,16 @@ class TestVsBatman:
         np.testing.assert_allclose(got, want, rtol=0, atol=3e-8)
 
     def test_lightcurve_grid(self):
-        """Dense z-grid at several (r, u1, u2): max abs deviation < 1e-9."""
+        """Dense z-grid at several (r, u1, u2): max abs deviation < 3e-8.
+
+        This test prints "Convergence failure in ellpic_bulirsch" twice.
+        That comes from *batman's* C elliptic-integral routine, on grid
+        points just outside contact (z + r - 1 ~ 1e-4), and it writes to
+        the C-level stdout so pytest cannot capture it. Adjudicated
+        against the Limbdark.jl-port oracle at exactly those points, our
+        error is <= 3e-16 and batman's is 1e-9 to 1.8e-8 — which is why
+        the tolerance here is batman's floor, not ours.
+        """
         for r, u1, u2 in [(0.1, 0.4, 0.25), (0.01, 0.1, 0.5),
                           (0.3, 0.6, -0.2), (0.05, 0.9, 0.05)]:
             z = np.linspace(0.0, 1.0 + 2 * r, 4001)

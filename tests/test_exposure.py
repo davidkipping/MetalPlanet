@@ -165,3 +165,61 @@ class TestIntegrationWithTheRest:
             p.fp = 1e-3
             metalplanet.TransitModel(p, T, transittype="secondary",
                                      exp_time=EXP, integration="contact")
+
+
+class TestRegressions:
+    """Bugs found in the closing audit of v0.4.0."""
+
+    def test_light_curve_mx_also_averages(self):
+        """It used to return the INSTANTANEOUS flux at the exposure
+        mid-times while light_curve returned the averaged one — a silent
+        1e-3 discrepancy on the entry point advertised for differentiable
+        pipelines."""
+        for ecc, w, law, u in ((0.0, 90.0, "quadratic", (0.4, 0.25)),
+                               (0.3, 63.0, "quadratic", (0.4, 0.25)),
+                               (0.0, 90.0, "polynomial", (0.3, 0.2, 0.1))):
+            m, p = _model(ecc, w, law, u, exp_time=EXP,
+                          integration="contact", n_gl=7)
+            with mx.stream(mx.cpu):
+                mx_out = np.array(m.light_curve_mx(p))
+            assert np.abs(m.light_curve(p) - mx_out).max() < 1e-14
+
+    def test_out_of_transit_is_unity_to_roundoff(self):
+        """The clamped sub-interval widths summed to the exposure only to
+        ~1e-14; the weights are renormalised so a partition of unity
+        really is one."""
+        t = np.arange(-0.2, 2 * 3.456 + 0.2, 0.01)
+        p = metalplanet.TransitParams()
+        p.t0, p.per, p.rp, p.a, p.inc = 0.0, 3.456, 0.1, 8.8, 87.07
+        p.ecc, p.w, p.u, p.limb_dark = 0.0, 90.0, [0.4, 0.25], "quadratic"
+        f = metalplanet.TransitModel(
+            p, t, exp_time=EXP, integration="contact", n_gl=7).light_curve(p)
+        phase = np.abs(((t + 3.456 / 2) % 3.456) - 3.456 / 2)
+        far = phase > 0.5 * 0.126 + EXP
+        assert far.sum() > 100
+        assert np.abs(f[far] - 1.0).max() < 1e-15
+
+    def test_multiple_transits_use_the_right_epoch(self):
+        """Contacts are placed relative to the nearest transit centre, so
+        a series spanning several epochs must integrate each correctly."""
+        t = np.arange(-0.2, 2 * 3.456 + 0.2, 0.005)
+        p = metalplanet.TransitParams()
+        p.t0, p.per, p.rp, p.a, p.inc = 0.0, 3.456, 0.1, 8.8, 87.07
+        p.ecc, p.w, p.u, p.limb_dark = 0.0, 90.0, [0.4, 0.25], "quadratic"
+        mk = metalplanet.TransitModel(p, t, exp_time=EXP,
+                                      integration="contact", n_gl=7)
+        ref = metalplanet.TransitModel(p, t, exp_time=EXP,
+                                       supersample_factor=4001)
+        assert np.abs(mk.light_curve(p) - ref.light_curve(p)).max() < 2e-6
+        assert (mk.light_curve(p) < 0.99).sum() > 10   # transits present
+
+    def test_exposure_longer_than_the_transit(self):
+        t = np.linspace(-0.13, 0.13, 201)
+        p = metalplanet.TransitParams()
+        p.t0, p.per, p.rp, p.a, p.inc = 0.0, 3.456, 0.1, 8.8, 87.07
+        p.ecc, p.w, p.u, p.limb_dark = 0.0, 90.0, [0.4, 0.25], "quadratic"
+        got = metalplanet.TransitModel(
+            p, t, exp_time=0.30, integration="contact", n_gl=9).light_curve(p)
+        ref = metalplanet.TransitModel(
+            p, t, exp_time=0.30, supersample_factor=20001).light_curve(p)
+        assert np.abs(got - ref).max() < 1e-6
