@@ -52,9 +52,22 @@ two kernel dispatches, not one; at m = 10^6 it is sixteen. That
 chunking exists for **float32 accumulation control** (a two-level
 summation tree, error O(eps·√n_chunks) instead of O(eps·n) — see
 anvil's precision.py), and you should keep it even when memory is not a
-concern. The current anvil model is the **circular v1 orbit**
-(no eccentricity parameter); eccentric orbits live in the batman-style
-frontend today and in a planned eccentric sampling target.
+concern.
+
+Two models are available: `make_quad_transit_flux` (8 parameters,
+circular) and **`make_ecc_transit_flux`** (10 parameters, eccentric:
+`secosw`, `sesinw` replace nothing and `b` is reinterpreted through
+cos i = b (1 + e sin w) / (a (1 - e^2))). Both are fused Metal kernels.
+
+**The eccentric model needs a prior term that the engine cannot give
+you.** Periastron clearance (a(1-e) > 1+r) and a real inclination
+(|cos i| <= 1) couple parameters, so no box of ParamSpecs expresses
+them, and MetalPlanet clamps every numerical hazard — an unphysical
+geometry returns an ordinary *finite* log-likelihood. Add
+`ecc_constraint_penalty` (a smooth quadratic barrier; `-inf` walls make
+HMC diverge) or wrap your likelihood in `PenalizedLogLike`, as
+`make_ecc_target` does. This is the same failure mode as the missing
+bounds in the emcee recipe below, and it is just as silent.
 
 ### The stretch move without CPU emcee: anvil's emcee facade
 
@@ -161,8 +174,15 @@ forward, 519× cheaper than reverse-mode autodiff.
   after 100, 1.7×10⁻⁴ after 1,000. Use `epoch_center_times` (float64
   host preprocessing → per-orbit residual + orbit number) as the anvil
   path does; the circular fp32 path is then good to ~10⁻⁷-flux, and
-  the frontend's *eccentric* path (Cartesian separation) to the
-  ~10⁻⁶-flux level for e ≤ 0.999.
+  the frontend's *eccentric* path to the ~10⁻⁶-flux level for
+  e ≤ 0.999.
+- **Eccentricity near zero**: sample `(sqrt(e) cos w, sqrt(e) sin w)`,
+  not `(e, w)` — and note that e = 0 is then an *interior* point the
+  sampler genuinely visits. MetalPlanet's eccentric path is
+  transit-anchored (`metalplanet/anchored.py`) precisely so that fp32
+  gradients survive there: measured relative gradient error is ~1e-7
+  flat from e = 0.1 down to e = 1e-8, where the textbook formulation is
+  already 100% wrong (`benchmarks/v3_kh_grad_conditioning.py`).
 - **Frontend note**: the batman-style `TransitModel.light_curve(params)`
   is deliberately a one-parameter-set API (batman parity) — fine for
   plotting and single evaluations, wrong as a sampler's inner loop.

@@ -3,28 +3,71 @@
 All notable changes to MetalPlanet. Versioning: semantic-ish
 (MAJOR.MINOR.PATCH); every release is tagged `vX.Y.Z` in git.
 
-## [Unreleased]
+## [0.3.0] — 2026-09-27
+
+The eccentric release: eccentric orbits now run on the fused Metal
+kernel with analytic gradients, and have their own anvil sampling
+target. Plan, gates and review log: `docs/v3eccentrickernel_plan.md`.
 
 ### Added
-- `benchmarks/profile_vjp_reduction.py`: decomposes the v2 VJP into
-  kernel vs `mx.sum`-reduction cost. Measured at 1024×65,536
-  (uncontended): the seven reductions are ~15% of the VJP (5.4 of
-  35.9 ms, streaming at DRAM-peak 345 GB/s) — the kernel is
-  compute-bound, refuting an external 45% / 2–2.4× estimate; verdict
-  recorded in `docs/eccentric-kernel-notes.md`.
-- `docs/v3eccentrickernel_plan.md`: combined implementation plan
-  (milestones E0–E5) for the v3 eccentric fused kernel and the
-  two-stage in-kernel VJP reduction, targeting v0.3.0.
-  Revision 2 (2026-09-27) folds in an adversarial review: the
-  reduction needs no predicated exits/barrier (`simd_sum` over active
-  lanes is verified and specified), so E0 is decoupled; the
-  (√e cos ω, √e sin ω) fp32 gradient noise floor (5% at e=1e-5) is
-  addressed by a transit-anchored formulation or an e floor; joint
-  physical constraints get a q_e reparameterization + barrier; gates
-  are re-pinned to the circular kernel (graph eccentric baseline:
-  567 ms fwd / 68.6 s value+grad). Scripts: `benchmarks/v3_*.py`.
-- `docs/MLXtransit_prompt.md`: the founding project prompt, preserved
-  from the retired MLXtransit working folder.
+- **Transit-anchored eccentric orbit** (`metalplanet/anchored.py`).
+  Solves for δ = E − E₀ about inferior conjunction rather than for E
+  about periastron. Algebraically identical to the direct formulation
+  (verified to 2.5e-15 in flux over an (e, w) grid including
+  near-apastron and near-periastron transits at e = 0.999), but it never
+  forms ω as an intermediate — only e·cosω and e·sinω, taken directly
+  from the (√e cosω, √e sinω) sampling pair. Since ∂ω/∂k = −h/e
+  diverges, the direct form computes a finite gradient as the difference
+  of two O(a/e) terms: measured fp32 gradient error 5e-2 at e = 1e-5 and
+  1e+1 at e = 1e-8, versus ~1e-7 *flat* for the anchored form
+  (`benchmarks/v3_kh_grad_conditioning.py`).
+- **v3 eccentric Metal kernel** (`make_ecc_core_metal`): anchored solve,
+  Cartesian tail and ALFM19 photometry in one register-resident pass,
+  plus its analytic VJP (14 per-point partials). At 1024 × 65,536:
+  forward 29.0 ms, value+grad 76.0 ms — 1.41x / 1.38x the circular
+  kernel, and 20x / 902x the same model as a compiled MLX graph.
+  Parity 3.7e-7 vs the graph over e ∈ [0, 0.999].
+- **In-kernel gradient reduction** for the circular v2 VJP
+  (`make_model_core_metal(reduce="simd"|"grid")`, simd default).
+  `metal::simd_sum` reduces over the *active* lanes, so early-returned
+  lanes drop out by themselves — no predication, threadgroup memory,
+  barrier or grid padding. Backward 35.8 → 30.8 ms (1.16x), peak memory
+  4.56 → 2.74 GB, transients 1.88 GB → 58.7 MB. `"grid"` is retained as
+  the parity oracle.
+- **Eccentric anvil target**: `make_ecc_transit_flux` / `make_ecc_target`
+  (10 parameters), `ecc_constraint_penalty` and `PenalizedLogLike` for
+  the two joint constraints a box of ParamSpecs cannot express
+  (periastron clearance, |cos i| ≤ 1) — without them an unphysical
+  geometry returns a finite log-likelihood and the chain silently
+  samples an improper posterior.
+- `examples/chees_ecc.py`: eccentric ChEES-HMC injection-recovery at a
+  deliberately low truth (e = 0.02), where the parameterization matters.
+- Benchmarks: `bench_ecc_kernel.py`, `v3_reduction_spike.py`,
+  `v3_kh_grad_conditioning.py`, `v3_ecc_graph_baseline.py`; the VJP
+  profiler now A/Bs both reduction strategies.
+
+### Changed
+- Markley starter cbrt: `metal::precise::powr` (~220x a multiply, ~20%
+  of orbit time) replaced by the inverse-cbrt bit trick with the
+  principled (4/3)·0x3f800000 seed and three division-free Newton steps;
+  1.7e-6 max relative error in-kernel against a ~1e-4 requirement.
+- The batman-style frontend uses the anchored formulation for eccentric
+  orbits, so φ is measured straight from t0 and the
+  mean-anomaly-at-transit offset no longer appears in the compiled graph.
+- Kernel sources share one `_PHOT_PARTIALS` fragment and expand through
+  `_subst`, which asserts no marker survives — an unexpanded marker is a
+  Metal compile failure, which aborts the process rather than raising.
+
+### Fixed
+- **NaN gradients at δ ≈ π** (ordinary apastron-side geometry):
+  `_one_minus_cos` floored its denominator instead of setting it to 1 on
+  the inactive branch, so the VJP hit 0 × inf for every parameter routed
+  through the solve.
+- **NaN gradients at exactly e = 0** — an interior point of the sampling
+  disc — from `sqrt(max(e, 0))`, whose derivative is infinite there, and
+  from `arctan2(0, 0)`, whose gradient is undefined.
+- `test_loglike_at_truth_is_sane` now accounts for upstream anvil's
+  recentring policy (the unnormalized logL is `value + log_offset_const`).
 
 ## [0.2.0] — 2026-09-06
 

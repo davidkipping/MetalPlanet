@@ -21,6 +21,7 @@ from .flux import flux_dev, light_curve
 from .greens import greens_transform_np, quad_g_coeffs, quad_norm
 from .kepler import (kepler, kepler_E, kepler_E_sincos,
                      separation_keplerian)
+from .anchored import anchor_constants, separation_anchored
 from .ld import q_to_u, q_to_u_np, u_to_q_np
 from .metal import flux_dev_metal, metal_available
 from .solution import sn_dev, sn_dev_with_aux
@@ -43,6 +44,8 @@ __all__ = [
     "kepler_E",
     "kepler_E_sincos",
     "separation_keplerian",
+    "separation_anchored",
+    "anchor_constants",
     "q_to_u",
     "q_to_u_np",
     "u_to_q_np",
@@ -50,4 +53,4 @@ __all__ = [
     "sn_dev_with_aux",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

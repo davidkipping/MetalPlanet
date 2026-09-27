@@ -114,7 +114,15 @@ Median of 7, each configuration in an isolated process
 |---|---:|---:|
 | reverse-mode autodiff (MLX graph) | 495 ms | 27252 ms |
 | analytic VJP (MLX graph) | 498 ms | 618 ms |
-| **fused Metal model kernel** (orbit + photometry) | **17.5 ms** | **52.5 ms** |
+| **fused Metal model kernel** — circular | **20.6 ms** | **54.9 ms** |
+| **fused Metal model kernel** — eccentric | **29.0 ms** | **76.0 ms** |
+
+The eccentric kernel solves Kepler's equation per point and still costs
+only ~1.4x the circular one, because its single sincos *replaces* the
+circular kernel's rather than adding to it; the extra work is the
+Markley starter, a division-free cbrt and one fifth-order refinement.
+Against the same model as a compiled MLX graph (567 ms / 68.6 s) that is
+20x the forward and 900x the gradient (`benchmarks/bench_ecc_kernel.py`).
 
 The MLX graph is memory-bandwidth-bound (~KB of intermediate traffic per
 point); the hand-fused kernels (`metal.py`) keep the whole model — the
@@ -127,8 +135,10 @@ any npv 64-4096; no unified-memory cliff). End-to-end: the full-scale
 vs the graph core is <= 5e-7 with fp64-oracle adjudication; the whole
 oracle battery + kernel failure-mode matrix runs in CI (97 tests).
 `core="metal"` is the default in the anvil target (v2 model-level
-kernel) and the fp32 frontend (photometric kernel); fp64/CPU paths
-silently use the graph core.
+kernel) and the fp32 frontend; fp64/CPU paths silently use the graph
+core. The eccentric model has its own anvil target
+(`make_ecc_transit_flux`, 10 parameters) — see the sampler guide for the
+joint-constraint barrier it requires.
 
 ## Numerical notes worth knowing
 
@@ -149,8 +159,17 @@ silently use the graph core.
   (rotated, projected). Exactly equivalent to the conic form and
   strictly better conditioned — no near-transit or apastron
   cancellations; fp32-trustworthy at the 1e-6 flux level to e ≤ 0.999.
-  See docs/eccentric-kernel-notes.md for the verified backward-pass
-  formulas and fused-kernel design findings.
+* The eccentric orbit is additionally **transit-anchored**
+  (`anchored.py`): solving for δ = E − E₀ about inferior conjunction
+  instead of for E about periastron. Algebraically identical (2.5e-15
+  in flux), but it never forms ω as an intermediate — only e·cosω and
+  e·sinω, taken straight from the (√e cosω, √e sinω) sampling pair as
+  k√e and h√e. That matters because ∂ω/∂k = −h/e diverges: in the
+  textbook form two O(a/e) terms cancel, and fp32 *gradients* w.r.t.
+  the sampling coordinates are 5% wrong at e = 1e-5 and 100% wrong at
+  e = 1e-8. Anchored, the same measurement is ~1e-7 flat
+  (`benchmarks/v3_kh_grad_conditioning.py`). e = 0 is an interior point
+  of that disc, so a sampler really does go there.
 * MLX ops on pure-Python operands mint float32 scalars: when a
   parameter may be a Python float, scalar branches must use `math.*`
   or an fp64 path silently carries fp32-accurate constants.

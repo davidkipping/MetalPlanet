@@ -98,3 +98,26 @@ print(f"\neccentric / circular = {teg/tcg:.2f}x   (gate: <= 2.00x)")
 print(f"vs compiled graph eccentric (68.55 s): {68.55/teg:,.0f}x faster")
 mx.clear_cache(); mx.reset_peak_memory(); ecc_vg()
 print(f"peak memory, eccentric value+grad: {mx.get_peak_memory()/1e9:.2f} GB")
+
+
+# ---- batch scaling: does the eccentric kernel keep the flat profile? -------
+print(f"\n=== batch scaling (npv x 100,000 points), eccentric forward ===")
+M_B = 100_000
+dtb = rng.uniform(-0.2, 0.2, M_B).astype(np.float32)
+x2db = mx.array(np.vstack([dtb, np.zeros(M_B, np.float32)]))
+for npv in (64, 256, 1024, 4096):
+    ob = np.ones(npv, np.float32)
+    args_b = [mx.array(0.0 * ob), mx.array(0.0 * ob), mx.array(0.1 * ob),
+              mx.array(8.8 * ob), mx.array(0.4225 * ob), mx.array(0.3077 * ob)]
+    orbb = _pack(mx.array(np.float32(math.sqrt(E) * math.cos(W)) * ob),
+                 mx.array(np.float32(math.sqrt(E) * math.sin(W)) * ob),
+                 mx.array(np.float32(0.3 / 8.8) * ob))
+    mx.eval(orbb, *args_b)
+
+    def one(_a=args_b, _o=orbb, _n=npv):
+        mx.eval(ke(inputs=[x2db, _a[0], _a[1], _a[2], _a[3], _o, _a[4],
+                           _a[5], PREF, M_B],
+                   output_shapes=[(_n, M_B)], output_dtypes=[mx.float32],
+                   grid=(M_B, _n, 1), threadgroup=(256, 1, 1))[0])
+    t = timeit(one, f"  npv = {npv:5d}")
+    print(f"        -> {npv/t:,.0f} curves/s, {npv*M_B/t/1e9:.2f} Gpt/s")

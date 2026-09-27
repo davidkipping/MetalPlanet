@@ -5,6 +5,26 @@ tested the plan's assumptions against Metal and the production code.
 The review log at the end records what changed and why; every new
 number below reproduces from a script in `benchmarks/`.
 
+> **STATUS: executed (2026-09-27), shipped in v0.3.0.** E0-E5 all
+> landed and every gate was met. Measured at 1024 x 65,536 on an M2 Max:
+>
+> | milestone | gate | measured |
+> |---|---|---|
+> | E0 simd reduction | backward >= 1.1x, transients gone | **1.16x**, 1.88 GB -> 58.7 MB, peak 4.56 -> 2.74 GB |
+> | E1 eccentric forward | parity <= 5e-7, <= 1.5x circular | **3.7e-7**, **1.41x** (with E2) |
+> | E2 cheap cbrt | E1 gates held | 1.54x -> **1.41x**, cbrt 1.7e-6 |
+> | E3 eccentric VJP | all chains vs fp64, <= 2x circular | **1.38x**, 902x the graph path |
+> | E4 anvil target | no unphysical state finite-and-unpenalized | `ecc_constraint_penalty` + gate tests |
+> | E5 eccentric ChEES | zero divergences, truth recovered | see CHANGELOG 0.3.0 |
+>
+> Two real bugs were found *by building the gates*, both the same class
+> and both in code this plan introduced: a floored denominator in
+> `_one_minus_cos` (NaN gradients at delta ~ pi, ordinary apastron
+> geometry) and `sqrt(max(e, 0))` in the anvil transform (infinite
+> derivative at e = 0, an interior point of the sampling disc). Recorded
+> here because the plan's risk list did *not* anticipate them: it worried
+> about register pressure and the sign fold, neither of which bit.
+
 Two pieces of work: the v3 fused kernel for eccentric orbits (forward +
 analytic VJP), and a two-stage in-kernel gradient reduction replacing
 the per-point partial grids + `mx.sum` pattern. Revision 1 coupled them
