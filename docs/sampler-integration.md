@@ -141,6 +141,36 @@ wrong:
    contract. (Casting the finished fp32 sum to float64 recovers
    nothing.)
 
+### Trajectory length: measure it, do not inherit it
+
+ChEES adapts the step size but is given a ceiling on trajectory length,
+and that ceiling turns out to matter enormously — in *opposite directions*
+on the two targets (`benchmarks/bench_leapfrog_cap.py`, 256 chains,
+300 warmup + 200 samples, 20k data):
+
+| `max_leapfrog` | circular, 8 param | eccentric, 10 param |
+|---:|---|---|
+| 16 | 7.7 ESS/s, R̂ 2.20 | **5.3 ESS/s**, R̂ 3.91 |
+| 24 | 8.2 ESS/s, R̂ 1.83 | 4.9 ESS/s, R̂ 3.74 |
+| 96 | 10.9 ESS/s, R̂ 1.13 | 2.0 ESS/s, R̂ 3.78, **172 divergences** |
+| 384 | **71.2 ESS/s**, R̂ **1.00** | — |
+
+On the well-conditioned circular posterior, going from 24 to 384 buys
+**8.7x the ESS/s and takes R̂ from 1.83 to 1.00** with no divergences.
+On the eccentric one the same change is *harmful*: ESS/s falls
+monotonically, minESS is pinned near 277 however long the trajectories,
+and long ones eventually break the integrator. The (a, b, e, w)
+duration ridge simply is not traversed by going further in a straight
+line.
+
+Two cautions. ESS cannot exceed `n_chains x n_samples`, so past some
+point ESS/s must fall however well the trajectories decorrelate — the
+robust claim is the direction and size of the effect, not the integer
+384. And a cap inherited from another problem (or from an era when
+gradients were 20x more expensive, which is where the old default of 24
+came from) is worth re-measuring before trusting: it is two lines of
+config and it was worth 8.7x here.
+
 ### Sampling the eccentric model: what to expect
 
 Two findings from the reference run (`examples/chees_ecc.py`, measured

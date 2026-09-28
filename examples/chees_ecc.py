@@ -50,6 +50,13 @@ print(f"eccentric ChEES: e = {ECC}, w = {OMEGA_DEG} deg, "
       f"{N_CHAINS} chains, 10 parameters", flush=True)
 print(engine.validate_precision(tt.target, u0[:32]), "\n", flush=True)
 
+# max_leapfrog stays LOW here, unlike the circular script which measured
+# best at 384. On this target longer trajectories are actively harmful
+# (benchmarks/bench_leapfrog_cap.py): ESS/s falls 5.29 -> 4.86 -> 3.04 ->
+# 2.01 from 16 to 96 steps, minESS is pinned near 277 regardless, and at
+# 96 the integrator produces 172 divergences. The (a, b, e, w) duration
+# ridge is not traversed by longer trajectories, so the extra work buys
+# nothing and eventually breaks the integrator.
 kernel = engine.ChEESHMC(tt.target, max_leapfrog=24)
 t0 = time.perf_counter()
 res = engine.run(kernel, tt.target, u0, n_warmup=600, n_samples=200,

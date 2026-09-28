@@ -2,10 +2,26 @@
 half already ran; see injection_recovery.py for the full two-sampler
 script).
 
-Bounds vs the first attempt: max_leapfrog capped at 24 (the unbounded
-adaptation drove trajectories toward 128 x ~1.2 s gradients), schedule
-200 warmup + 100 samples, progress ticks every 10 iterations (rate, ETA,
-acceptance, divergences) so the run is never blind.
+The cap of 24 that this script used to carry dated from when gradients
+cost ~1.2 s; they now cost 55-76 ms, and re-measuring
+(benchmarks/bench_leapfrog_cap.py) showed the cap was the binding
+constraint on this target:
+
+    max_leapfrog   ESS/s   max R-hat   divergences
+              24    8.17        1.83             0
+              96   10.89        1.13             0
+             192   21.18        1.03             0
+             384   71.24        1.00             0
+
+i.e. 8.7x the throughput AND convergence from R-hat 1.83 to 1.00, with
+no divergences anywhere. 384 is used here; beyond it ESS approaches its
+ceiling of n_chains x n_samples, so ESS/s must fall however well the
+trajectories decorrelate. NOTE this is target-specific: on the
+*eccentric* target longer trajectories are actively harmful (see
+examples/chees_ecc.py).
+
+Progress ticks every 10 iterations (rate, ETA, acceptance, divergences)
+so the run is never blind.
 """
 
 import time
@@ -27,7 +43,7 @@ u0 = mx.array(
 
 print(engine.validate_precision(tt.target, u0[:32]), "\n", flush=True)
 
-kernel = engine.ChEESHMC(tt.target, max_leapfrog=24)
+kernel = engine.ChEESHMC(tt.target, max_leapfrog=384)
 t0 = time.perf_counter()
 res = engine.run(kernel, tt.target, u0, n_warmup=200, n_samples=100,
                  seed=1, reanchor_every=100, progress=10)

@@ -26,6 +26,15 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 - `exposure_nodes` and `flux_dev_poly` accept a leading batch axis, so
   contact integration and polynomial limb darkening both work under the
   batched frontend.
+- **ChEES `max_leapfrog` re-measured** (`benchmarks/bench_leapfrog_cap.py`).
+  The examples' cap of 24 dated from when gradients cost ~1.2 s; at
+  55–76 ms it was the binding constraint on the circular target, where
+  384 gives **8.7× the ESS/s (8.2 → 71.2)** and takes R̂ from 1.83 to
+  1.00 with no divergences. On the *eccentric* target the same change is
+  harmful — ESS/s falls monotonically and 96 steps produces 172
+  divergences — so `examples/chees_ecc.py` keeps 24 and says why. The
+  guidance, and the caution that ESS is ceiling-limited by
+  `n_chains × n_samples`, is in `docs/sampler-integration.md`.
 
 ## [0.4.1] — 2026-09-27
 
