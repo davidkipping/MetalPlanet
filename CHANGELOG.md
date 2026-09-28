@@ -6,6 +6,19 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 ## [Unreleased]
 
 ### Added
+- **`notebooks/02_joint_transit_and_gp.ipynb`** — fitting a transit and
+  correlated stellar variability *together*: MetalPlanet as anvil-gp's mean
+  model, a SHO Gaussian process over the residual, and anvil sampling all
+  twelve parameters at once. The two packages compose with no adapter, because
+  `make_quad_transit_flux` already returns exactly the `(v, x) -> (n_chains, m)`
+  contract anvil-gp's `mean_fn` wants — which is what exposing
+  `x64`/`y_fit`/`model_fn` on `TransitTarget` anticipated. Measured at the
+  committed settings: 0 divergences, R-hat 1.001, every parameter within
+  1.11 sigma (including the GP amplitude and timescale), ~2 minutes. It also
+  records two findings from building it: `max_leapfrog=384`, best for the
+  transit-only posterior, is wrong here (128 is right), and *shrinking* the
+  light curve to save time made convergence worse, because the GP
+  hyperparameters lose their constraint.
 - **`notebooks/01_metalplanet_with_anvil.ipynb`** — a tutorial covering
   forward modelling (orbits, limb-darkening laws, finite exposures, batched
   evaluation) and fitting real Kepler/TESS-style photometry end to end with
