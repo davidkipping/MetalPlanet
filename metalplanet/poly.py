@@ -140,12 +140,19 @@ def flux_dev_poly(z: mx.array, r, u, n_max: int | None = None) -> mx.array:
         A, c = greens_affine(int(n))
         Am = mx.array(A, dtype=u.dtype)
         cm = mx.array(c, dtype=u.dtype)
-        g = mx.matmul(Am, mx.reshape(u, (int(n),))) + cm
+        if u.ndim >= 2:
+            # batched coefficients: (n_sets, N) -> (n_sets, N+1), kept as
+            # a column so it broadcasts against the (n_sets, m) solution
+            g = mx.matmul(u, Am.T) + cm
+            gs = [g[..., i:i + 1] for i in range(g.shape[-1])]
+        else:
+            g = mx.matmul(Am, mx.reshape(u, (int(n),))) + cm
+            gs = [g[i] for i in range(g.shape[0])]
         s = sn_dev_poly(z, r, n_max)
-        norm = _PI * (g[0] + 2.0 * g[1] / 3.0)
+        norm = _PI * (gs[0] + 2.0 * gs[1] / 3.0)
         acc = None
-        for i, sn in enumerate(s):
-            term = (g[i] / norm) * sn
+        for gn, sn in zip(gs, s):
+            term = (gn / norm) * sn
             acc = term if acc is None else acc + term
         return z * 0.0 if acc is None else acc
 

@@ -80,10 +80,12 @@ def exposure_nodes(t, t0, period, exp_time, contacts, n_gl: int,
                    dtype=mx.float64):
     """Quadrature nodes and weights for each exposure window.
 
-    ``t`` are exposure mid-times (m,), ``contacts`` the four phase
-    offsets from ``contact_offsets``. Returns (times, weights), both
-    (m, 5 * n_gl), with the weights already normalised by the exposure
-    time so that summing weight * flux gives the average.
+    ``t`` are exposure mid-times, ``contacts`` the four phase offsets
+    from ``contact_offsets``. Returns (times, weights), both with one
+    extra trailing axis of length 5 * n_gl, the weights already
+    normalised so that summing weight * flux gives the average. A leading
+    batch axis is allowed throughout (many parameter sets at once), in
+    which case t and the scalars broadcast against each other.
     """
     xg, wg = gauss_legendre(n_gl)
     xg = mx.array(xg, dtype=dtype)
@@ -113,13 +115,14 @@ def exposure_nodes(t, t0, period, exp_time, contacts, n_gl: int,
         lo, hi = edges[i], edges[i + 1]
         mid = 0.5 * (lo + hi)
         halfw = 0.5 * (hi - lo)
-        times.append(mid[:, None] + halfw[:, None] * xg[None, :])
-        weights.append(halfw[:, None] * wg[None, :] * inv_dt)
-    W = mx.concatenate(weights, axis=1)
+        times.append(mid[..., None] + halfw[..., None] * xg)
+        weights.append(halfw[..., None] * wg * inv_dt)
+    axis = times[0].ndim - 1
+    W = mx.concatenate(weights, axis=axis)
     # The sub-interval widths sum to the exposure only up to rounding in
     # the clamped edges, which left the out-of-transit flux at 1 + 2e-14
     # instead of exactly 1. Renormalising restores that contract (the
     # weights are a partition of unity by construction, so this only
     # removes round-off).
-    W = W / mx.sum(W, axis=1, keepdims=True)
-    return mx.concatenate(times, axis=1), W
+    W = W / mx.sum(W, axis=axis, keepdims=True)
+    return mx.concatenate(times, axis=axis), W

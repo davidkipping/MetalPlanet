@@ -103,6 +103,26 @@ def _ld_coeffs(params) -> tuple[float, float]:
         "outside the ALFM19 formulation.")
 
 
+class _nullcontext:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *a):
+        return False
+
+
+def _ld_coeffs_batch(law, u):
+    """(u1, u2) columns for the legacy laws, from a (n_sets, N) array."""
+    if law == "uniform":
+        z = np.zeros(u.shape[0])
+        return z, z
+    if law == "linear":
+        return u[:, 0], np.zeros(u.shape[0])
+    if law == "quadratic":
+        return u[:, 0], u[:, 1]
+    raise ValueError(f"unexpected law {law!r} in the batched path")
+
+
 def _unpack_ld(poly, tail):
     """(u1, u2, uvec, fp) from the trailing limb-darkening + fp args."""
     if poly:
@@ -428,6 +448,137 @@ class TransitModel:
             out = out.reshape(self.t.size,
                               self.supersample_factor).mean(axis=1)
         return out
+
+    # -- batched surface (the sampler-friendly one) ------------------------
+
+    _BATCH_KEYS = ("t0", "per", "rp", "a", "inc", "ecc", "w", "fp")
+
+    def _stack_params(self, params_seq):
+        """(n_sets, ) arrays for each scalar parameter, plus (n_sets, N)
+        limb-darkening coefficients. Accepts a sequence of TransitParams
+        or one TransitParams whose attributes are already arrays."""
+        if isinstance(params_seq, (list, tuple)):
+            seq = list(params_seq)
+            if not seq:
+                raise ValueError("no parameter sets given")
+            cols = {}
+            for k in self._BATCH_KEYS:
+                vals = [getattr(p, k) for p in seq]
+                cols[k] = np.array([0.0 if v is None else float(v)
+                                    for v in vals], dtype=np.float64)
+            for p in seq:
+                if p.limb_dark != self.limb_dark:
+                    raise ValueError("every parameter set must use the "
+                                     "model's limb-darkening law")
+            u = np.array([list(p.u) for p in seq], dtype=np.float64)
+            return cols, u
+        p = params_seq                       # array-valued TransitParams
+        if p.limb_dark != self.limb_dark:
+            raise ValueError("limb-darkening law changed since model "
+                             "construction; build a new TransitModel")
+        # any subset of the attributes may be arrays; the batch size is
+        # the longest of them (scalars broadcast against it)
+        sizes = set()
+        for k in self._BATCH_KEYS:
+            v = getattr(p, k)
+            if v is None:
+                continue
+            sizes.add(np.atleast_1d(np.asarray(v, dtype=np.float64)).size)
+        sizes.discard(1)
+        if len(sizes) > 1:
+            raise ValueError(f"inconsistent parameter-array lengths: "
+                             f"{sorted(sizes)}")
+        n = sizes.pop() if sizes else 1
+        cols = {}
+        for k in self._BATCH_KEYS:
+            v = getattr(p, k)
+            v = 0.0 if v is None else v
+            cols[k] = np.broadcast_to(
+                np.atleast_1d(np.asarray(v, dtype=np.float64)),
+                (n,)).astype(np.float64)
+        u = np.asarray(p.u, dtype=np.float64)
+        u = np.broadcast_to(np.atleast_2d(u), (n, u.shape[-1])) \
+            if u.size else np.zeros((n, 0))
+        return cols, np.ascontiguousarray(u)
+
+    def light_curves(self, params_seq) -> np.ndarray:
+        """(n_sets, n_times) for MANY parameter sets in ONE batched call.
+
+        ``light_curve`` is deliberately one-parameter-set-at-a-time, for
+        batman parity — and calling it in a loop is the single worst thing
+        a sampler can do here (a GPU dispatch costs ~0.2-0.7 ms whatever
+        its size, so looping is two to three orders of magnitude slower
+        than batching; see docs/sampler-integration.md). This is the
+        batched form: the same times, many parameter sets, one dispatch.
+
+        ``params_seq`` is either a sequence of TransitParams or a single
+        TransitParams whose scalar attributes are arrays of equal length.
+        Mixed circular and eccentric sets are fine: the transit-anchored
+        orbit degenerates exactly to the circular one at e = 0, so one
+        code path serves both.
+
+        For fitting with thousands of chains prefer ``metalplanet.anvil``,
+        which owns the likelihood and the float32 conditioning as well.
+        """
+        cols, u_np = self._stack_params(params_seq)
+        n = cols["t0"].size
+        dt = self.dtype
+
+        def col(a):
+            return mx.array(np.asarray(a, np.float64).reshape(n, 1), dtype=dt)
+
+        stream = self._stream
+        ctx = mx.stream(stream) if stream is not None else _nullcontext()
+        with ctx:
+            t0, per = col(cols["t0"]), col(cols["per"])
+            rp, a = col(cols["rp"]), col(cols["a"])
+            ecc = cols["ecc"]
+            inc = np.radians(cols["inc"])
+            ci = col(np.cos(inc))
+            w = np.radians(cols["w"])
+            sq = np.sqrt(ecc)
+            k, h = col(sq * np.cos(w)), col(sq * np.sin(w))
+            fp = col(cols["fp"])
+            if self._n_poly:
+                uvec = mx.array(u_np, dtype=dt)
+                u1 = u2 = None
+            else:
+                uvec = None
+                u1, u2 = _ld_coeffs_batch(self.limb_dark, u_np)
+                u1, u2 = col(u1), col(u2)
+
+            if self.integration == "contact":
+                esw = ecc * np.sin(w)
+                beta = np.sqrt(np.maximum(1.0 - ecc * ecc, 1e-30))
+                a_sky = col(cols["a"] * (1.0 + esw) / beta)
+                b_eff = col(cols["a"] * (1.0 - ecc * ecc)
+                            / (1.0 + esw) * np.cos(inc))
+                cs = contact_offsets(rp, a_sky, b_eff)
+                T, W = exposure_nodes(mx.array(self.t, dtype=dt)[None, :],
+                                      t0, per, self.exp_time, cs,
+                                      self.n_gl, dtype=dt)
+                phi = (2.0 * math.pi) * (T - t0[..., None]) / per[..., None]
+                z, front = separation_anchored(phi, k[..., None],
+                                               h[..., None], a[..., None],
+                                               ci[..., None])
+                # every per-set column needs the trailing node axis
+                nd = lambda c: None if c is None else c[..., None]
+                f = self._photom(z, front, rp[..., None], nd(u1), nd(u2),
+                                 nd(fp),
+                                 uvec=None if uvec is None
+                                 else uvec[:, None, :])
+                out = mx.sum(f * W, axis=-1)
+            else:
+                tt = mx.array(self._t_super, dtype=dt)[None, :]
+                phi = (2.0 * math.pi) * (tt - t0) / per
+                z, front = separation_anchored(phi, k, h, a, ci)
+                out = self._photom(z, front, rp, u1, u2, fp, uvec=uvec)
+            res = np.array(out, dtype=np.float64)
+        if (self.supersample_factor > 1
+                and self.integration == "supersample"):
+            res = res.reshape(n, self.t.size,
+                              self.supersample_factor).mean(axis=2)
+        return res
 
     def light_curve_mx(self, params) -> mx.array:
         """Supersampled-grid flux as an MLX array (stays in the graph;

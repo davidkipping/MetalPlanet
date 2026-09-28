@@ -96,6 +96,28 @@ installed; everything else imports standalone. If you rename or move
 either repo, re-run the editable installs (`pip install -e ...`) — the
 venv stores absolute paths.
 
+## Evaluating many parameter sets
+
+`TransitModel.light_curve(params)` is one parameter set at a time, for
+batman parity. `TransitModel.light_curves(sets)` is the batched form —
+same times, many parameter sets, one dispatch:
+
+```python
+m = metalplanet.TransitModel(params, t, dtype=mx.float32)
+flux = m.light_curves([p1, p2, p3])        # -> (3, len(t))
+# or one TransitParams whose attributes are arrays:
+p.rp = np.array([0.09, 0.10, 0.11])
+flux = m.light_curves(p)                   # -> (3, len(t))
+```
+
+Measured at **112x** a Python loop over `light_curve` (2,000 sets x 301
+points, float32 GPU) — a GPU dispatch costs ~0.2-0.7 ms whatever its
+size, so looping pays that floor 2,000 times. Mixed circular and
+eccentric sets are fine in one batch, and every exposure and
+limb-darkening mode works. For fitting with thousands of chains prefer
+`metalplanet.anvil`, which owns the likelihood and the float32
+conditioning too.
+
 ## The batching rule (read this before writing a sampler)
 
 Batch every walker/chain into one model call — a Python loop over

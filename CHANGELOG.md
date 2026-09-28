@@ -3,6 +3,30 @@
 All notable changes to MetalPlanet. Versioning: semantic-ish
 (MAJOR.MINOR.PATCH); every release is tagged `vX.Y.Z` in git.
 
+## [0.5.0] — 2026-09-27
+
+### Added
+- **`TransitModel.light_curves(params_seq)`** — the batched frontend.
+  Same time grid, many parameter sets, one dispatch: **112x** a Python
+  loop over `light_curve` (2,000 sets x 301 points, float32 GPU). Accepts
+  a sequence of `TransitParams` or one whose scalar attributes are
+  arrays. Works in every mode (uniform/linear/quadratic/polynomial,
+  supersampled or contact-integrated) and handles **mixed circular and
+  eccentric sets in one batch**, since the transit-anchored orbit
+  degenerates exactly to the circular one at e = 0. This closes the gap
+  between what `docs/sampler-integration.md` prescribes — never loop,
+  always batch — and what the batman-style API made easy.
+- `docs/frontend-circular-kernel-plan.md`: a full plan for routing the
+  frontend's *circular* path through the v2 kernel, deliberately **not
+  implemented**. Measured reward is only ~1.4x (2.31 vs 3.26 Gpt/s)
+  against the highest risk on the backlog, so the design is recorded for
+  whoever revisits it rather than executed.
+
+### Changed
+- `exposure_nodes` and `flux_dev_poly` accept a leading batch axis, so
+  contact integration and polynomial limb darkening both work under the
+  batched frontend.
+
 ## [0.4.1] — 2026-09-27
 
 Two defects in 0.4.0's new exposure code, found by a closing audit.
