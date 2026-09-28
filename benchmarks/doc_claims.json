@@ -2,9 +2,9 @@
  "batch_vs_loop": {
   "npv": 10000,
   "npt": 1000,
-  "looped_ms": 2004.9,
-  "batched_ms": 3.45,
-  "speedup": 581
+  "looped_ms": 2261.7,
+  "batched_ms": 2.89,
+  "speedup": 782
  },
  "fp32_wrap_flux_error": {
   "1": "2.0e-07",

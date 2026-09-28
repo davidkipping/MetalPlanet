@@ -12,8 +12,14 @@ most of that at ~1% cost to eccentric chains. The decision taken was to
 one fused kernel now serves both, the frontend's circular path routes
 through it automatically (which is what this plan wanted, without a
 second route), and mixed circular/eccentric batches are free. See
-CHANGELOG 0.6.0 for the measured cost of the unification. The text below
-is kept as the record of the alternative that was *not* chosen.
+CHANGELOG 0.6.0/0.6.1 for the measured cost of the unification. The
+frontend outcome was then measured on a quiet machine: `light_curve()`
+gains **2.06x at N = 1e5 and nothing at N >= 1e6** (0.99x at 1e7),
+because at large N it is dominated by the float64 host copy (80 MB at
+1e7), not by the model. So this plan's own gate — ">= 1.3x at 1e7, else
+revert" — would have failed; it fails for the unified route too, which
+stays only because it costs nothing. The text below is kept as the
+record of the alternative that was *not* chosen.
 
 ## What it would do
 

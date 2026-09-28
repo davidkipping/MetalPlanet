@@ -110,8 +110,8 @@ p.rp = np.array([0.09, 0.10, 0.11])
 flux = m.light_curves(p)                   # -> (3, len(t))
 ```
 
-Measured at **112x** a Python loop over `light_curve` (2,000 sets x 301
-points, float32 GPU) — a GPU dispatch costs ~0.2-0.7 ms whatever its
+Measured at **~160x** a Python loop over `light_curve` (2,000 sets x 301
+points, float32 GPU; 112x when first measured under load) — a GPU dispatch costs ~0.2-0.7 ms whatever its
 size, so looping pays that floor 2,000 times. Mixed circular and
 eccentric sets are fine in one batch, and every exposure and
 limb-darkening mode works. For fitting with thousands of chains prefer
@@ -136,20 +136,22 @@ Median of 7, each configuration in an isolated process
 |---|---:|---:|
 | reverse-mode autodiff (MLX graph) | 495 ms | 27252 ms |
 | analytic VJP (MLX graph) | 498 ms | 618 ms |
-| **fused Metal model kernel** — circular orbit (e = 0) | **~22 ms** | **~70 ms** |
-| **fused Metal model kernel** — eccentric orbit (e = 0.3) | **29.0 ms** | **76.0 ms** |
+| **fused Metal model kernel** — circular orbit (e = 0) | **21.8 ms** | **60.2 ms** |
+| **fused Metal model kernel** — eccentric orbit (e = 0.3) | **29.4 ms** | **76.2 ms** |
 
 Since v0.6.0 there is **one** model kernel. A circular orbit is e = 0 on
 the transit-anchored eccentric kernel — exact, not approximate (the
 anchored form degenerates to the circular one to 7e-16) — and a
 per-chain branch skips the Kepler solve there. The chain index is uniform
 across a threadgroup, so the branch cannot diverge and costs genuinely
-eccentric chains ~1%. The circular figures above are the retired
-dedicated kernel's clean measurements (20.6 / 54.9 ms) scaled by the
-unified kernel's measured ratios against it, **1.07x forward and 1.27x
-value+grad**; re-measure with `benchmarks/bench_ecc_kernel.py` on a quiet
-GPU. That 27% on circular gradients is the price of one kernel instead
-of two — and of mixed circular/eccentric batches for free. Against the
+eccentric chains 1%. Against the retired dedicated circular kernel
+(20.6 / 54.9 ms) that is **1.06x forward and 1.10x value+grad**, measured
+in one run on a quiet machine (`benchmarks/ab_retired_kernel.py`) — the
+price of one kernel instead of two, and of mixed circular/eccentric
+batches for free. "value+grad" here means forward and VJP evaluated
+together, as a sampler does; evaluating only the gradients skips the
+forward entirely and reads ~1.2x, which is a different (and less
+relevant) quantity. Against the
 same model as a compiled MLX graph (567 ms / 68.6 s) the eccentric kernel
 is 20x the forward and 900x the gradient.
 

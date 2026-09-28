@@ -57,7 +57,17 @@ def vg(orb):
     def loss(t0_, pp_, r_, a_, orb_, u1_, u2_):
         return mx.sum(core(x2d, t0_, pp_, r_, a_, orb_, u1_, u2_))
     f = mx.value_and_grad(loss, argnums=tuple(range(7)))
-    return lambda: mx.eval(*f(t0, pp, r, a, orb, u1, u2)[1])
+
+    # NOTE: evaluate the VALUE as well as the gradients. Our custom VJP
+    # recomputes from the primals and ignores `output`, so if only the
+    # gradients are evaluated MLX's lazy graph never runs the forward
+    # kernel at all and the number silently becomes VJP-only. A sampler
+    # needs both (energy and force), which is what value+grad has always
+    # meant in this repo's tables.
+    def run():
+        v, g = f(t0, pp, r, a, orb, u1, u2)
+        mx.eval(v, *g)
+    return run
 
 
 print(f"=== fused model kernel, {N} x {M:,} ===")

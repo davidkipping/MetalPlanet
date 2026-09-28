@@ -71,6 +71,9 @@ for label, e in (("circular (e = 0)", 0.0), ("eccentric (e = 0.3)", 0.3)):
     ts = timeit(lambda: mx.eval(mx.sum(part, axis=2)), "mx.sum over the partials")
     core = make_model_core_metal(PREF)
     f = mx.value_and_grad(lambda *p: mx.sum(core(x2d, *p)), argnums=tuple(range(7)))
-    tv = timeit(lambda: mx.eval(*f(t0, pp, r, a, orb, u1, u2)[1]), "full value_and_grad")
+    def _vg():
+        v, g = f(t0, pp, r, a, orb, u1, u2)
+        mx.eval(v, *g)          # value AND grads, or the forward is skipped
+    tv = timeit(_vg, "full value_and_grad (forward + VJP)")
     print(f"  partials: {N*NGRAD*COLS*4/1e6:.1f} MB; reduction share of VJP "
           f"{ts/(tk+ts)*100:.1f}%; VJP kernel / forward {tk/tf:.2f}x\n")

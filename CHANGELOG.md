@@ -3,6 +3,49 @@
 All notable changes to MetalPlanet. Versioning: semantic-ish
 (MAJOR.MINOR.PATCH); every release is tagged `vX.Y.Z` in git.
 
+## [0.6.1] — 2026-09-28
+
+Quiet-machine re-measurement of 0.6.0, and a correction to how its
+headline number was defined.
+
+### Fixed
+- **The cost of retiring the circular kernel is 1.06x forward / 1.10x
+  value+grad**, not the 1.07x / 1.27x stated in 0.6.0. Two things were
+  wrong with the earlier figure: it was measured under GPU contention,
+  and its "value+grad" evaluated only the gradients. Our custom VJP
+  recomputes from the primals and ignores the forward output, so when
+  only gradients are evaluated MLX's lazy graph never runs the forward
+  kernel at all and the number silently becomes VJP-only (1.21x on a
+  quiet machine). A sampler needs energy *and* force — forward plus VJP —
+  which is what every earlier table meant. `bench_ecc_kernel.py`,
+  `profile_vjp_reduction.py` and the new `ab_retired_kernel.py` now
+  evaluate both. Without the fast paths the same measurement reads
+  1.43x / 1.40x; eccentric chains pay 1.01x.
+- README kernel figures are now measured, not derived: circular
+  21.8 / 60.2 ms, eccentric 29.4 / 76.2 ms at 1024 x 65,536 (3.08 and
+  2.28 Gpt/s); eccentric value+grad peak memory 0.39 GB.
+- The batched frontend measures **163x** a loop on a quiet machine
+  (2,000 sets x 301 points, fp32); the 112x in 0.5.0 was taken under
+  load. The batching claim in the sampler guide re-verified at 782x,
+  inside its documented range.
+
+### Added
+- `benchmarks/ab_retired_kernel.py`: reproduces the unified-vs-retired
+  comparison by extracting the pre-0.6.0 `metal.py` from git, fixing its
+  imports and renaming its kernels (MLX caches JIT kernels by name, so
+  two sources with one name would collide silently).
+
+### Noted
+- The frontend's fp32 `light_curve()` gains **nothing** from the kernel
+  route at N >= 1e6 (0.99x circular, 1.01x eccentric at 1e7) because it
+  is dominated by the float64 host copy — 80 MB at 1e7 — and 2.06x
+  (circular) at 1e5 where dispatch overhead matters. The superseded
+  `frontend-circular-kernel-plan.md` had a "revert below 1.3x at 1e7"
+  gate for a *separate* route; this route is the same kernel and costs
+  nothing to keep, so it stays, and the earlier claim of 2.1x for the
+  eccentric frontend routing (measured under load) should be read as
+  "2x at 1e5, host-copy-bound above".
+
 ## [0.6.0] — 2026-09-28
 
 One model kernel. The dedicated circular kernel is retired; circular
@@ -18,10 +61,13 @@ which is exact there (7e-16 against the circular closed form).
   against the retired kernel at 1024 x 65,536, same run: forward
   **1.07x**, value+grad **1.27x** (without the fast paths it would have
   been 1.46x / 1.41x); genuinely eccentric chains pay 0.98x — nothing.
+  *Superseded by 0.6.1: measured under contention and with a VJP-only
+  definition of value+grad; the corrected figure is 1.06x / 1.10x.*
   Flux parity 4e-7 at e = 0 (fp32 operation order) and bit-identical at
-  e = 0.3. That 27% on circular gradients is the deliberate price of one
-  kernel: half the surface for every future photometric fix, and mixed
-  circular/eccentric batches (`TransitModel.light_curves`) for free.
+  e = 0.3. That cost (10% on value+grad once measured properly, see
+  0.6.1) is the deliberate price of one kernel: half the surface for
+  every future photometric fix, and mixed circular/eccentric batches
+  (`TransitModel.light_curves`) for free.
 - `make_model_core_metal(period_ref)` is now the unified factory taking
   the packed orbit constants; `make_ecc_core_metal` remains as an alias.
   The `reduce="grid"|"simd"` switch is gone with the kernel it belonged
