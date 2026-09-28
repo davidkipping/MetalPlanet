@@ -6,6 +6,16 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 ## [Unreleased]
 
 ### Added
+- **`notebooks/01_metalplanet_with_anvil.ipynb`** — a tutorial covering
+  forward modelling (orbits, limb-darkening laws, finite exposures, batched
+  evaluation) and fitting real Kepler/TESS-style photometry end to end with
+  anvil. Generated from `notebooks/build_01.py` so the prose and code stay
+  reviewable in a diff, and every code cell is executed before commit; the
+  committed copy carries no outputs. The sampling cell is sized to finish in
+  ~25 s while producing a genuinely healthy fit (0 divergences, R-hat 1.002,
+  ~1500 effective samples/s), and it teaches the coupling that produced the
+  first draft's failure: 200 warmup iterations at `max_leapfrog=384` gave
+  3,120 divergences and R-hat 1.22, where 300 gave zero and 1.002.
 - **`make_transit_target(t, y, yerr, t0_guess, period_guess, ...)`** — the
   entry point for real Kepler/TESS photometry, and the piece that was
   missing for production use. It owns the float64 conditioning the
