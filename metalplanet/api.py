@@ -50,7 +50,8 @@ from .flux import flux_dev
 from .metal import flux_dev_metal
 from .anchored import separation_anchored
 from .poly import flux_dev_poly
-from .exposure import contact_offsets, exposure_nodes
+from .exposure import (contact_geometry, contact_offsets,
+                       exposure_nodes)
 from .solution import sn_dev
 from .trig import sincos
 
@@ -109,6 +110,19 @@ class _nullcontext:
 
     def __exit__(self, *a):
         return False
+
+
+def _check_ecc(ecc):
+    """Reject eccentricities the model cannot represent. The single-set
+    path gets this for free from math.sqrt raising on a negative; the
+    batched path would instead hand np.sqrt a negative, emit a warning
+    and return an all-NaN row that a sampler turns into -inf with nothing
+    pointing at the parameter."""
+    bad = ~((ecc >= 0.0) & (ecc < 1.0))
+    if bool(np.any(bad)):
+        raise ValueError(
+            f"eccentricity must be in [0, 1); got "
+            f"{np.asarray(ecc)[bad][:4]} (and possibly more)")
 
 
 def _ld_coeffs_batch(law, u):
@@ -191,7 +205,18 @@ class TransitModel:
         else:
             t_super = t
         self._t_super = t_super
-        self._t_mx = mx.array(t_super.astype(np.float64), dtype=self.dtype)
+        # (6) Absolute mission time stamps cannot survive float32: a TESS
+        # BTJD of ~2500 d has an fp32 ulp of 2.4e-4 d (21 s), Kepler's
+        # BJD-2454833 is similar and raw BJD (2.457e6 d) has a 0.25 d ulp.
+        # So for any non-float64 dtype the grid is re-centred on a float64
+        # reference HERE, on the host, and t0 is shifted by the same
+        # amount at every call site -- exactly what epoch_center_times does
+        # for the anvil path. The fp32 graph then only ever sees O(baseline)
+        # numbers. float64 keeps a zero offset so its heavily-tested
+        # round-off behaviour is untouched.
+        self._t_ref = (0.0 if self.dtype == mx.float64
+                       else float(0.5 * (t_super.min() + t_super.max())))
+        self._t_mx = mx.array(t_super - self._t_ref, dtype=self.dtype)
         self._compiled = {}
 
     # -- internals ---------------------------------------------------------
@@ -208,20 +233,17 @@ class TransitModel:
         a = float(params.a)
         ci = math.cos(math.radians(float(params.inc)))
         ecc = float(params.ecc)
-        if ecc == 0.0:
-            a_sky, b = a, a * ci
-        else:
-            w = math.radians(float(params.w))
-            esw = ecc * math.sin(w)
-            beta = math.sqrt(max(1.0 - ecc * ecc, 1e-30))
-            a_sky = a * (1.0 + esw) / beta
-            b = a * (1.0 - ecc * ecc) / (1.0 + esw) * ci
+        esw = ecc * math.sin(math.radians(float(params.w)))
+        a_sky, b = contact_geometry(a, ecc, esw, ci,
+                                    sqrt=math.sqrt,
+                                    maximum=lambda x, y: max(x, y))
 
         def s(x):
             return mx.array(float(x), dtype=self.dtype)
 
         cs = contact_offsets(s(params.rp), s(a_sky), s(b))
-        return exposure_nodes(self._t_mx, s(params.t0), s(params.per),
+        return exposure_nodes(self._t_mx, s(params.t0 - self._t_ref),
+                              s(params.per),
                               s(self.exp_time), cs, self.n_gl,
                               dtype=self.dtype)
 
@@ -230,7 +252,7 @@ class TransitModel:
         array), in the model dtype (eager; used by light_curve_mx and
         tests)."""
         per = float(params.per)
-        t0 = float(params.t0)
+        t0 = float(params.t0) - self._t_ref
         ecc = float(params.ecc)
         inc = math.radians(float(params.inc))
         t = self._t_mx if t is None else t
@@ -336,12 +358,9 @@ class TransitModel:
                 def raw(t0, per, a, k, h, ci, rp, *ld_fp):
                     u1, u2, uv, fp = _unpack_ld(poly, ld_fp)
                     e = k * k + h * h
-                    sq = mx.sqrt(mx.maximum(e, 1e-30))
-                    esw = h * sq                      # e sin w
-                    beta = mx.sqrt(mx.maximum(1.0 - e * e, 1e-30))
-                    r_c = a * (1.0 - e * e) / (1.0 + esw)   # sep. at conj.
-                    a_sky = a * (1.0 + esw) / beta
-                    cs = contact_offsets(rp, a_sky, r_c * ci)
+                    esw = h * mx.sqrt(mx.maximum(e, 1e-30))   # e sin w
+                    a_sky, b_conj = contact_geometry(a, e, esw, ci)
+                    cs = contact_offsets(rp, a_sky, b_conj)
                     T, W = exposure_nodes(t, t0, per, ex, cs, n_gl,
                                           dtype=self.dtype)
                     phi = (2.0 * math.pi) * (T - t0) / per
@@ -438,25 +457,39 @@ class TransitModel:
 
         ld = ((self._uvec(params),) if self._n_poly
               else (s(u1), s(u2)))
+        t0 = params.t0 - self._t_ref
         if ecc == 0.0:
             a = float(params.a)
             return self._get_compiled(True)(
-                s(params.t0), s(params.per), s(a), s(a * math.cos(inc)),
+                s(t0), s(params.per), s(a), s(a * math.cos(inc)),
                 s(params.rp), *ld, s(fp))
         w = math.radians(float(params.w))
         return self._get_compiled(False)(
-            s(params.t0), s(params.per), s(params.a),
+            s(t0), s(params.per), s(params.a),
             s(math.sqrt(ecc) * math.cos(w)), s(math.sqrt(ecc) * math.sin(w)),
             s(math.cos(inc)), s(params.rp), *ld, s(fp))
 
     # -- batman-compatible surface ----------------------------------------
 
-    def light_curve(self, params) -> np.ndarray:
-        """Model flux at the times given at construction (numpy array)."""
+    def _check_law(self, params):
+        """The limb-darkening law AND its order are fixed per model: the
+        order is baked into the compiled graph (and into the g_n affine
+        map), so a changed count would be silently truncated by the zip in
+        flux_dev_poly rather than raising."""
         if params.limb_dark != self.limb_dark:
             raise ValueError(
                 "limb-darkening law changed since model construction; "
                 "build a new TransitModel")
+        if self._n_poly and len(list(params.u)) != self._n_poly:
+            raise ValueError(
+                f"polynomial limb-darkening order changed since model "
+                f"construction ({self._n_poly} -> "
+                f"{len(list(params.u))} coefficients); build a new "
+                f"TransitModel")
+
+    def light_curve(self, params) -> np.ndarray:
+        """Model flux at the times given at construction (numpy array)."""
+        self._check_law(params)
         if self._stream is not None:
             with mx.stream(self._stream):
                 f = self._eval_compiled(params)
@@ -487,15 +520,16 @@ class TransitModel:
                 cols[k] = np.array([0.0 if v is None else float(v)
                                     for v in vals], dtype=np.float64)
             for p in seq:
-                if p.limb_dark != self.limb_dark:
-                    raise ValueError("every parameter set must use the "
-                                     "model's limb-darkening law")
+                # the same validation the single-set path performs: an
+                # unchecked set returns a plausible but wrong curve, or a
+                # silent NaN row that a sampler reads as -inf
+                self._check_law(p)
+                _ld_coeffs(p)
             u = np.array([list(p.u) for p in seq], dtype=np.float64)
+            _check_ecc(cols["ecc"])
             return cols, u
         p = params_seq                       # array-valued TransitParams
-        if p.limb_dark != self.limb_dark:
-            raise ValueError("limb-darkening law changed since model "
-                             "construction; build a new TransitModel")
+        self._check_law(p)
         # any subset of the attributes may be arrays; the batch size is
         # the longest of them (scalars broadcast against it)
         sizes = set()
@@ -519,6 +553,7 @@ class TransitModel:
         u = np.asarray(p.u, dtype=np.float64)
         u = np.broadcast_to(np.atleast_2d(u), (n, u.shape[-1])) \
             if u.size else np.zeros((n, 0))
+        _check_ecc(cols["ecc"])
         return cols, np.ascontiguousarray(u)
 
     def light_curves(self, params_seq) -> np.ndarray:
@@ -550,7 +585,7 @@ class TransitModel:
         stream = self._stream
         ctx = mx.stream(stream) if stream is not None else _nullcontext()
         with ctx:
-            t0, per = col(cols["t0"]), col(cols["per"])
+            t0, per = col(cols["t0"] - self._t_ref), col(cols["per"])
             rp, a = col(cols["rp"]), col(cols["a"])
             ecc = cols["ecc"]
             inc = np.radians(cols["inc"])
@@ -568,15 +603,17 @@ class TransitModel:
                 u1, u2 = col(u1), col(u2)
 
             if self.integration == "contact":
-                esw = ecc * np.sin(w)
-                beta = np.sqrt(np.maximum(1.0 - ecc * ecc, 1e-30))
-                a_sky = col(cols["a"] * (1.0 + esw) / beta)
-                b_eff = col(cols["a"] * (1.0 - ecc * ecc)
-                            / (1.0 + esw) * np.cos(inc))
-                cs = contact_offsets(rp, a_sky, b_eff)
-                T, W = exposure_nodes(mx.array(self.t, dtype=dt)[None, :],
-                                      t0, per, self.exp_time, cs,
-                                      self.n_gl, dtype=dt)
+                a_sky_np, b_np = contact_geometry(
+                    cols["a"], ecc, ecc * np.sin(w), np.cos(inc),
+                    sqrt=np.sqrt, maximum=np.maximum)
+                cs = contact_offsets(rp, col(a_sky_np), col(b_np))
+                # (7) self._t_mx already holds the (re-centred) grid on
+                # the device -- re-uploading it per call is a pure waste
+                # on the surface the docs tell samplers to use. In contact
+                # mode it equals the exposure mid-times.
+                T, W = exposure_nodes(self._t_mx[None, :], t0, per,
+                                      self.exp_time, cs, self.n_gl,
+                                      dtype=dt)
                 phi = (2.0 * math.pi) * (T - t0[..., None]) / per[..., None]
                 z, front = separation_anchored(phi, k[..., None],
                                                h[..., None], a[..., None],
@@ -589,7 +626,7 @@ class TransitModel:
                                  else uvec[:, None, :])
                 out = mx.sum(f * W, axis=-1)
             else:
-                tt = mx.array(self._t_super, dtype=dt)[None, :]
+                tt = self._t_mx[None, :]
                 phi = (2.0 * math.pi) * (tt - t0) / per
                 z, front = separation_anchored(phi, k, h, a, ci)
                 out = self._photom(z, front, rp, u1, u2, fp, uvec=uvec)

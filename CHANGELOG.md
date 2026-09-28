@@ -5,6 +5,57 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+### Added
+- **`make_transit_target(t, y, yerr, t0_guess, period_guess, ...)`** — the
+  entry point for real Kepler/TESS photometry, and the piece that was
+  missing for production use. It owns the float64 conditioning the
+  float32 sampler depends on (time reduction, epoch centering, flux
+  offset), the ParamSpec boxes (with `b` reaching past 1 so grazing
+  geometries are inside the box, unlike the synthetic targets' 0.9),
+  `report_offset` so results come back on the input time system, and the
+  eccentric barrier. `TransitTarget.model_params()` builds the
+  model-space vector from physical values; `x64`/`y_fit`/`model_fn` are
+  exposed for anvil-gp to wrap. `examples/fit_mission_data.py` fits a
+  TESS-shaped sector end to end: 40,000 points, zero divergences,
+  R-hat 1.002, all eight parameters within 1.7 sigma.
+
+### Fixed
+- **float32 models silently corrupted mission time stamps.** The frontend
+  uploaded absolute times raw, so a TESS BTJD (~2500 d, fp32 ulp 21 s)
+  gave 1.65e-4 flux error — larger than many planet depths — Kepler BKJD
+  5.1e-5, and raw BJD 1.2e-2 (unusable). The grid is now re-centred on a
+  float64 reference at construction with the offset carried into t0
+  everywhere, so the error is **9.9e-7 regardless of the time system**.
+  float64 models keep a zero offset and are bit-unchanged.
+- **`PenalizedLogLike` raised `RecursionError` under `copy`, `deepcopy`
+  and unpickling**: `__getattr__` delegated unconditionally, so lookups
+  that precede `__init__` recursed on `base` itself. Checkpointing or
+  forking an eccentric target crashed.
+- **The eccentric barrier had a plateau outside the e_max disc.** The
+  model projects (secosw, sesinw) radially onto the disc, so beyond it the
+  likelihood is exactly constant in the radial direction and the previous
+  penalty's gradient there was purely tangential — a chain thrown into the
+  box corners (e_raw up to 1.8) had no force pushing it back. The barrier
+  now also penalises the *unprojected* eccentricity, and every residual is
+  dimensionless: `|cos i| - 1` used to explode to ~1e12 with ~1e11
+  gradients once the projection drove 1 - e^2 to 0.002, which would
+  collapse HMC's step size. A one-sided Huber shape keeps the force
+  bounded but never zero.
+- **Changing the polynomial limb-darkening order between calls returned
+  wrong flux silently** (2.6e-4 off; the extra terms were dropped by a
+  `zip`). The order is now validated alongside the law.
+- **The batched `light_curves` skipped the single path's validation**:
+  `ecc < 0` produced an all-NaN row with only a numpy warning, and a
+  quadratic set carrying three coefficients silently used the first two.
+  Both now raise, as they already did for `light_curve`.
+
+### Changed
+- `light_curves` reuses the device-resident time grid instead of
+  re-uploading it per call, the contact geometry
+  (`a_sky`, `b_conj`) is computed by one `contact_geometry` helper rather
+  than three copies that had already drifted apart, and `_unbroadcast` is
+  shared from `vjp.py` instead of duplicated in `kepler.py`.
+
 - `benchmarks/RESULTS.md` MetalPlanet single-curve rows re-measured on a
   quiet machine after the 0.6.0 unification (the circular frontend now
   runs on the fused kernel): fp32 0.74 → 0.42 ms at N = 1e5 and

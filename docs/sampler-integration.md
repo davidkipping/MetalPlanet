@@ -46,6 +46,35 @@ harder or use a CPU path.
 
 ## How each kind of sampler should call the model
 
+### Fitting real mission data
+
+```python
+from metalplanet.anvil import make_transit_target, import_engine
+engine, _ = import_engine()
+
+tt = make_transit_target(t, y, yerr,          # BTJD/BKJD/BJD, flux ~1
+                         t0_guess=..., period_guess=...)
+u0 = ...                                       # (n_chains, 8) in u-space
+res = engine.run(engine.ChEESHMC(tt.target, max_leapfrog=384),
+                 tt.target, u0, n_warmup=300, n_samples=200)
+```
+
+`make_transit_target` owns the conditioning the float32 path depends on,
+so a caller never has to rediscover it: the float64 time reduction and
+epoch centering (raw BJD has a 0.25 d float32 ulp and cannot survive
+otherwise), the flux offset, the ParamSpec boxes, `report_offset` so
+reported values come back on the input time system, and — with
+`eccentric=True` — the joint-constraint barrier. **Omitting that barrier
+is the easiest way to get a wrong eccentric fit**: MetalPlanet clamps
+every numerical hazard, so an unphysical geometry returns an ordinary
+finite log-likelihood and the chain samples an improper posterior in
+silence. `tt.model_params(t0=..., period=..., r=..., ...)` converts
+physical values into the model-space vector without your having to
+remember which reference is subtracted from what, and `tt.x64` /
+`tt.y_fit` / `tt.model_fn` are exposed for a different likelihood — an
+anvil-gp GP over the same mean function, say — to wrap.
+`examples/fit_mission_data.py` is a runnable end-to-end version.
+
 ### anvil (native — nothing to do)
 
 `metalplanet.anvil.make_quad_transit_flux(period_ref)` returns the

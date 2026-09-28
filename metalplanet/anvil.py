@@ -39,7 +39,8 @@ from .orbit import epoch_center_times, separation_circular, tau_from_epochs
 __all__ = ["make_quad_transit_flux", "make_target", "QuadTransitTarget",
            "import_engine", "make_ecc_transit_flux", "make_ecc_target",
            "EccTransitTarget", "ecc_constraint_penalty",
-           "PenalizedLogLike", "PARAM_NAMES_ECC"]
+           "PenalizedLogLike", "PARAM_NAMES", "PARAM_NAMES_ECC",
+           "make_transit_target", "TransitTarget", "DEFAULT_BOUNDS"]
 
 PARAM_NAMES = ["t0_off", "p_off", "r", "b", "a", "q1", "q2", "df0"]
 
@@ -222,8 +223,153 @@ def make_target(
     )
 
 
+
 # ---------------------------------------------------------------------------
-# eccentric target (v3)
+# real-data entry point
+# ---------------------------------------------------------------------------
+
+#: default ParamSpec boxes, in model units. ``b`` reaches past 1 so
+#: grazing geometries are inside the box; widen or narrow per target.
+DEFAULT_BOUNDS = {
+    "t0_off": (-0.5, 0.5), "p_off": (-0.05, 0.05),
+    "r": (0.005, 0.5), "b": (0.0, 1.2), "a": (1.5, 200.0),
+    "q1": (0.0, 1.0), "q2": (0.0, 1.0), "df0": (-0.01, 0.01),
+    "secosw": (-0.95, 0.95), "sesinw": (-0.95, 0.95),
+}
+
+
+@dataclass
+class TransitTarget:
+    """A fitting problem over REAL data, ready for anvil.
+
+    ``target`` is the TransformedLogDensity to sample; ``x64`` and
+    ``y_fit`` are the conditioned inputs (epoch-centered times, flux minus
+    one) should a different likelihood -- an anvil-gp GP over the same
+    mean function, say -- want to wrap the same model.
+    """
+
+    target: object                # applemcmc.TransformedLogDensity
+    transform: object             # applemcmc.Transform
+    loglike: object               # ChunkedGaussianLogLike (maybe penalized)
+    model_fn: object              # the batched (v, x) -> flux deviation
+    x64: np.ndarray               # (2, n) epoch-centered times
+    y_fit: np.ndarray             # y - 1
+    yerr: np.ndarray
+    t_ref: float                  # float64 time origin subtracted first
+    t0_ref: float                 # t0 reference (model units, from t_ref)
+    period_ref: float
+    param_names: list
+    eccentric: bool
+
+    def model_params(self, t0, period, **kw):
+        """Physical values -> the model-space vector the sampler uses.
+
+        Handles the two offset parameters so callers never have to
+        remember which reference is subtracted from what.
+        """
+        vals = dict(kw)
+        vals["t0_off"] = float(t0) - self.t_ref - self.t0_ref
+        vals["p_off"] = float(period) - self.period_ref
+        vals.setdefault("df0", 0.0)
+        missing = [n for n in self.param_names if n not in vals]
+        if missing:
+            raise ValueError(f"missing parameters: {missing}")
+        return np.array([float(vals[n]) for n in self.param_names])
+
+
+def make_transit_target(t, y, yerr, t0_guess, period_guess,
+                        eccentric: bool = False, bounds=None, policy=None,
+                        core: str = "metal", strength: float = 1e6):
+    """Build an anvil fitting problem from REAL photometry.
+
+    This is the entry point for mission data (Kepler, TESS, ...). It owns
+    the conditioning that the float32 sampling path depends on, so a
+    caller never has to rediscover it:
+
+    * absolute times are reduced by a float64 ``t_ref`` and then turned
+      into (per-orbit residual, orbit number) by ``epoch_center_times``
+      -- raw BJD cannot survive float32 (0.25 d ulp at 2.457e6);
+    * flux is fit as ``y - 1`` so the graph carries O(depth) numbers;
+    * ``t0_guess``/``period_guess`` become the references the sampler
+      perturbs around, and ``report_offset`` puts the reported values back
+      on the original time system;
+    * for ``eccentric=True`` the joint-constraint barrier is attached.
+      MetalPlanet clamps every numerical hazard, so an unphysical geometry
+      otherwise returns an ordinary finite log-likelihood and the chain
+      samples an improper posterior in silence -- omitting the barrier is
+      the single easiest way to get a wrong eccentric fit.
+
+    Args:
+        t, y, yerr: photometry, any consistent time system; y normalized
+            to ~1 out of transit.
+        t0_guess, period_guess: references in the SAME system as ``t``.
+            They need only be good to the width of the ``t0_off``/``p_off``
+            boxes (0.5 d and 0.05 d by default).
+        eccentric: 10-parameter model with (sqrt(e) cos w, sqrt(e) sin w)
+            instead of the 8-parameter circular one.
+        bounds: per-parameter (lo, hi) overrides on DEFAULT_BOUNDS.
+        strength: barrier weight for the eccentric constraints.
+    """
+    applemcmc, ChunkedGaussianLogLike = import_engine()
+    t = np.asarray(t, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    yerr = (np.full(t.size, float(yerr), dtype=np.float64)
+            if np.ndim(yerr) == 0 else np.asarray(yerr, dtype=np.float64))
+    if not (t.shape == y.shape == yerr.shape):
+        raise ValueError(f"t, y, yerr must match in shape; got {t.shape}, "
+                         f"{y.shape}, {yerr.shape}")
+    if t.size == 0:
+        raise ValueError("no data points")
+    if not np.all(np.isfinite(t) & np.isfinite(y) & np.isfinite(yerr)):
+        raise ValueError("t, y and yerr must all be finite "
+                         "(mask your data before fitting)")
+    if np.any(yerr <= 0.0):
+        raise ValueError("yerr must be positive")
+    if np.any(np.diff(t) < 0.0):
+        order = np.argsort(t)
+        t, y, yerr = t[order], y[order], yerr[order]
+
+    # float64 host conditioning, in the order that matters
+    t_ref = float(np.floor(t.min()))
+    t_model = t - t_ref
+    t0_ref = float(t0_guess) - t_ref
+    period_ref = float(period_guess)
+    x64 = epoch_center_times(t_model, t0_ref=t0_ref, period_ref=period_ref)
+    y_fit = y - 1.0
+
+    names = PARAM_NAMES_ECC if eccentric else PARAM_NAMES
+    lims = dict(DEFAULT_BOUNDS)
+    for k, v in (bounds or {}).items():
+        if k not in lims:
+            raise ValueError(f"unknown parameter {k!r}; expected "
+                             f"{sorted(lims)}")
+        lims[k] = v
+    report = {"t0_off": t_ref + t0_ref, "p_off": period_ref, "df0": 1.0}
+    transform = applemcmc.Transform([
+        applemcmc.ParamSpec(n, lo=lims[n][0], hi=lims[n][1],
+                            **({"report_offset": report[n]}
+                               if n in report else {}))
+        for n in names])
+
+    model_fn = (make_ecc_transit_flux(period_ref=period_ref, core=core)
+                if eccentric
+                else make_quad_transit_flux(period_ref=period_ref,
+                                            core=core))
+    loglike = ChunkedGaussianLogLike(model_fn, x64, y_fit, yerr, policy)
+    if eccentric:
+        loglike = PenalizedLogLike(
+            loglike, lambda v: ecc_constraint_penalty(v, strength=strength))
+    target = applemcmc.TransformedLogDensity(
+        loglike, transform, model_log_prob_hi=loglike.hi)
+    return TransitTarget(
+        target=target, transform=transform, loglike=loglike,
+        model_fn=model_fn, x64=x64, y_fit=y_fit, yerr=yerr, t_ref=t_ref,
+        t0_ref=t0_ref, period_ref=period_ref, param_names=list(names),
+        eccentric=eccentric)
+
+
+# ---------------------------------------------------------------------------
+# synthetic targets (injection-recovery)
 # ---------------------------------------------------------------------------
 
 PARAM_NAMES_ECC = ["t0_off", "p_off", "r", "b", "a", "q1", "q2",
@@ -261,25 +407,59 @@ def _ecc_orbit_from_v(v, e_max: float = E_MAX_NUMERICAL):
     return k, h, ci, e
 
 
+def _huber(c, delta: float = 1.0):
+    """One-sided Huber violation: 0 for c <= 0, c^2 near the boundary,
+    linear beyond delta.
+
+    A pure quadratic is the textbook HMC barrier, but here a far-outside
+    proposal can drive a violation to O(1000) -- the projection onto the
+    e_max disc sends 1 - e^2 to 0.002, which makes |cos i| explode -- and
+    c^2 then contributes ~1e12 with ~1e11 gradients, collapsing the step
+    size. Going linear past delta keeps the force bounded (2 delta) while
+    never letting it vanish, so a chain thrown into the failure region is
+    pushed back instead of either exploding or stalling.
+    """
+    x = mx.maximum(c, 0.0)
+    return mx.where(x <= delta, x * x, delta * (2.0 * x - delta))
+
+
 def ecc_constraint_penalty(v, strength: float = 1e6,
                            e_max: float = E_MAX_NUMERICAL) -> mx.array:
-    """Smooth barrier for the two JOINT physical constraints that a box
-    of ParamSpecs cannot express (returns <= 0, exactly 0 when feasible).
+    """Smooth barrier for the JOINT physical constraints that a box of
+    ParamSpecs cannot express (returns <= 0, exactly 0 when feasible).
 
       * periastron clearance   a (1 - e) > 1 + r
       * a real inclination     |cos i| <= 1
+      * the eccentricity disc  secosw^2 + sesinw^2 <= e_max
 
     MetalPlanet clamps every numerical hazard, so an unphysical proposal
     otherwise returns an ordinary *finite* log-likelihood and the chain
     samples an improper posterior silently. A quadratic barrier is used
     rather than a -inf wall because hard walls make HMC diverge.
+
+    The third term is what makes the barrier *escapable*. The model
+    projects (secosw, sesinw) radially onto the e_max disc, so outside it
+    the likelihood is exactly constant along the radial direction: a
+    chain thrown into the corners of the +/-0.95 box (where e_raw reaches
+    1.8) would sit on a plateau with no radial force pushing it back,
+    only the ParamSpec sigmoid Jacobian. Penalising the UNPROJECTED
+    e_raw restores a gradient that points inward.
     """
     k, h, ci, e = _ecc_orbit_from_v(v, e_max)
-    r, a = v[:, 2], v[:, 4]
-    c_peri = (1.0 + r) - a * (1.0 - e)             # want <= 0
-    c_inc = ci * ci - 1.0                          # want <= 0
-    viol = mx.maximum(c_peri, 0.0) ** 2 + mx.maximum(c_inc, 0.0) ** 2
-    return -strength * viol
+    r, a, b = v[:, 2], v[:, 4], v[:, 3]
+    e_raw = v[:, 7] ** 2 + v[:, 8] ** 2
+    sq = mx.sqrt(mx.maximum(e, 1e-30))
+    esw = mx.where(e_raw > e_max,
+                   v[:, 8] * mx.sqrt(mx.maximum(e_max / mx.maximum(
+                       e_raw, 1e-30), 0.0)) * sq, v[:, 8] * sq)
+    # each residual is DIMENSIONLESS and O(1): |cos i| - 1 would instead
+    # explode, because projecting onto the e_max disc drives 1 - e^2 to
+    # 0.002 and cos i with it, contributing ~1e12 with ~1e11 gradients.
+    # Same zero set, same sign, bounded scale.
+    c_peri = ((1.0 + r) - a * (1.0 - e)) / (1.0 + r + a)
+    c_inc = (b * (1.0 + esw) - a * (1.0 - e * e)) / (1.0 + b + a)
+    c_disc = (e_raw - e_max) / (1.0 + e_max)
+    return -strength * (_huber(c_peri) + _huber(c_inc) + _huber(c_disc))
 
 
 def make_ecc_transit_flux(period_ref: float, core: str = "metal"):
@@ -360,7 +540,15 @@ class PenalizedLogLike:
         return self.base.hi(v) + self.penalty(v.astype(mx.float64))
 
     def __getattr__(self, name):
-        return getattr(self.base, name)
+        # __getattr__ runs for ANY attribute missing from the instance,
+        # including lookups that happen before __init__ has assigned
+        # `base` -- copy/deepcopy/unpickle all probe __deepcopy__,
+        # __getstate__, __setstate__ on a bare object first. Delegating
+        # those blindly recurses on `base` itself and raises
+        # RecursionError where AttributeError is required.
+        if name.startswith("__") or "base" not in self.__dict__:
+            raise AttributeError(name)
+        return getattr(self.__dict__["base"], name)
 
 
 @dataclass

@@ -32,6 +32,9 @@ import math
 import mlx.core as mx
 
 from .ellip import dtype_eps
+# one implementation, shared: an edge-case fix here must not have to be
+# applied twice (it was duplicated verbatim in vjp.py)
+from .vjp import _unbroadcast
 from .trig import sincos
 
 __all__ = ["kepler", "kepler_E", "kepler_E_sincos",
@@ -42,17 +45,6 @@ _PI = math.pi
 # Markley starter constants: 3 pi / (pi - 6/pi) and 1.6 / (pi - 6/pi)
 _MK_A = 3.0 * math.pi / (math.pi - 6.0 / math.pi)
 _MK_B = 1.6 / (math.pi - 6.0 / math.pi)
-
-
-def _unbroadcast(grad: mx.array, shape) -> mx.array:
-    if grad.shape == tuple(shape):
-        return grad
-    while grad.ndim > len(shape):
-        grad = mx.sum(grad, axis=0)
-    for ax, n in enumerate(shape):
-        if n == 1 and grad.shape[ax] != 1:
-            grad = mx.sum(grad, axis=ax, keepdims=True)
-    return grad
 
 
 def _markley_starter(Ma: mx.array, e):

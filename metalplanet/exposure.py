@@ -35,7 +35,8 @@ import math
 import mlx.core as mx
 import numpy as np
 
-__all__ = ["gauss_legendre", "contact_offsets", "exposure_nodes"]
+__all__ = ["gauss_legendre", "contact_offsets", "contact_geometry",
+           "exposure_nodes"]
 
 
 def gauss_legendre(n: int):
@@ -74,6 +75,29 @@ def contact_offsets(r, a_sky, b):
         out.append(mx.arcsin(s))
     phi_out, phi_in = out
     return -phi_out, -phi_in, phi_in, phi_out
+
+
+def contact_geometry(a, ecc, esw, ci, sqrt=None, maximum=None):
+    """(a_sky, b_conj) for ``contact_offsets``, from the orbital elements.
+
+    ``a_sky`` is the sky-velocity-equivalent semi-major axis
+    a (1 + e sin w) / sqrt(1 - e^2) and ``b_conj`` the impact parameter at
+    inferior conjunction, a (1 - e^2) / (1 + e sin w) cos i. At e = 0 both
+    reduce to a and a cos i.
+
+    Written once and called from all three contact sites (the eager
+    frontend, the compiled frontend branch and the batched path), which
+    previously carried three copies that already differed in how they
+    floored ``esw`` and ``beta``. Pass ``e sin w`` rather than w so the
+    caller can build it however it likes -- h * sqrt(e) in the anchored
+    parameterisation, e * sin(w) from elements -- and pass the sqrt /
+    maximum for the flavour of array in play (math, numpy or mlx).
+    """
+    if sqrt is None:
+        sqrt, maximum = mx.sqrt, mx.maximum
+    beta = sqrt(maximum(1.0 - ecc * ecc, 1e-30))
+    one_p = 1.0 + esw
+    return a * one_p / beta, a * (1.0 - ecc * ecc) / one_p * ci
 
 
 def exposure_nodes(t, t0, period, exp_time, contacts, n_gl: int,
