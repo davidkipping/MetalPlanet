@@ -3,6 +3,17 @@
 All notable changes to MetalPlanet. Versioning: semantic-ish
 (MAJOR.MINOR.PATCH); every release is tagged `vX.Y.Z` in git.
 
+## [Unreleased]
+
+- `benchmarks/RESULTS.md` MetalPlanet single-curve rows re-measured on a
+  quiet machine after the 0.6.0 unification (the circular frontend now
+  runs on the fused kernel): fp32 0.74 → 0.42 ms at N = 1e5 and
+  1.43 → 1.13 ms at 1e6; unchanged at 1e7 (host-copy-bound); 0.24 →
+  0.34 ms at N ≤ 1e4, where the kernel's dispatch floor is slightly above
+  the graph path's — a 0.1 ms regression at sizes no GPU should be used
+  for. The crossover against batman (between 1e4 and 1e5) is unchanged.
+  fp64 rows, an unchanged path, moved < 3%.
+
 ## [0.6.1] — 2026-09-28
 
 Quiet-machine re-measurement of 0.6.0, and a correction to how its

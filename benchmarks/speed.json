@@ -1,95 +1,5 @@
 [
  {
-  "code": "metalplanet_fp32",
-  "mode": "single",
-  "n": 1000,
-  "threads": 0,
-  "median_s": 0.00023691600654274225,
-  "min_s": 0.00021920801373198628,
-  "reps": 15
- },
- {
-  "code": "metalplanet_fp32",
-  "mode": "single",
-  "n": 10000,
-  "threads": 0,
-  "median_s": 0.0007036669994704425,
-  "min_s": 0.0002209999947808683,
-  "reps": 15
- },
- {
-  "code": "metalplanet_fp32",
-  "mode": "single",
-  "n": 100000,
-  "threads": 0,
-  "median_s": 0.0007370830280706286,
-  "min_s": 0.0007049160194583237,
-  "reps": 15
- },
- {
-  "code": "metalplanet_fp32",
-  "mode": "single",
-  "n": 1000000,
-  "threads": 0,
-  "median_s": 0.0014272090047597885,
-  "min_s": 0.0013482089852914214,
-  "reps": 15
- },
- {
-  "code": "metalplanet_fp32",
-  "mode": "single",
-  "n": 10000000,
-  "threads": 0,
-  "median_s": 0.009271999995689839,
-  "min_s": 0.00838316697627306,
-  "reps": 15
- },
- {
-  "code": "metalplanet_fp64",
-  "mode": "single",
-  "n": 1000,
-  "threads": 0,
-  "median_s": 0.0004801659961231053,
-  "min_s": 0.0004309579962864518,
-  "reps": 15
- },
- {
-  "code": "metalplanet_fp64",
-  "mode": "single",
-  "n": 10000,
-  "threads": 0,
-  "median_s": 0.0015547499642707407,
-  "min_s": 0.001525666972156614,
-  "reps": 15
- },
- {
-  "code": "metalplanet_fp64",
-  "mode": "single",
-  "n": 100000,
-  "threads": 0,
-  "median_s": 0.014639665954746306,
-  "min_s": 0.01427170803071931,
-  "reps": 15
- },
- {
-  "code": "metalplanet_fp64",
-  "mode": "single",
-  "n": 1000000,
-  "threads": 0,
-  "median_s": 0.13264754152623937,
-  "min_s": 0.12876549997599795,
-  "reps": 12
- },
- {
-  "code": "metalplanet_fp64",
-  "mode": "single",
-  "n": 10000000,
-  "threads": 0,
-  "median_s": 1.3171224169782363,
-  "min_s": 1.3114604580332525,
-  "reps": 3
- },
- {
   "code": "batman",
   "mode": "single",
   "n": 1000,
@@ -852,6 +762,96 @@
   "threads": 0,
   "median_s": 1.7400759169831872,
   "min_s": 1.71364320802968,
+  "reps": 3
+ },
+ {
+  "code": "metalplanet_fp32",
+  "mode": "single",
+  "n": 1000,
+  "threads": 0,
+  "median_s": 0.00033608300145715475,
+  "min_s": 0.00030395807698369026,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp32",
+  "mode": "single",
+  "n": 10000,
+  "threads": 0,
+  "median_s": 0.0003351250197738409,
+  "min_s": 0.0003012910019606352,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp32",
+  "mode": "single",
+  "n": 100000,
+  "threads": 0,
+  "median_s": 0.00041562505066394806,
+  "min_s": 0.00034783396404236555,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp32",
+  "mode": "single",
+  "n": 1000000,
+  "threads": 0,
+  "median_s": 0.001129375072196126,
+  "min_s": 0.001088125049136579,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp32",
+  "mode": "single",
+  "n": 10000000,
+  "threads": 0,
+  "median_s": 0.00976037501823157,
+  "min_s": 0.009322750032879412,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp64",
+  "mode": "single",
+  "n": 1000,
+  "threads": 0,
+  "median_s": 0.0004230000777170062,
+  "min_s": 0.00040216592606157064,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp64",
+  "mode": "single",
+  "n": 10000,
+  "threads": 0,
+  "median_s": 0.0016521670622751117,
+  "min_s": 0.0015339170349761844,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp64",
+  "mode": "single",
+  "n": 100000,
+  "threads": 0,
+  "median_s": 0.014288042089901865,
+  "min_s": 0.013664916972629726,
+  "reps": 15
+ },
+ {
+  "code": "metalplanet_fp64",
+  "mode": "single",
+  "n": 1000000,
+  "threads": 0,
+  "median_s": 0.1291425625095144,
+  "min_s": 0.126983999973163,
+  "reps": 12
+ },
+ {
+  "code": "metalplanet_fp64",
+  "mode": "single",
+  "n": 10000000,
+  "threads": 0,
+  "median_s": 1.291773207951337,
+  "min_s": 1.2908465840155259,
   "reps": 3
  }
 ]

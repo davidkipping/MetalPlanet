@@ -43,8 +43,8 @@ Every code solves Kepler's equation itself; the oracle's separation comes from a
 | batman (1) | 0.02 ms | 0.20 ms | 1.92 ms | 18.91 ms | 193.80 ms |
 | exoplanet (1) | 0.04 ms | 0.29 ms | 2.82 ms | 29.79 ms | 318.36 ms |
 | jaxoplanet (all) | 0.13 ms | 0.56 ms | 2.10 ms | 20.19 ms | 182.95 ms |
-| metalplanet_fp32 (all) | 0.24 ms | 0.70 ms | 0.74 ms | 1.43 ms | 9.27 ms |
-| metalplanet_fp64 (all) | 0.48 ms | 1.55 ms | 14.64 ms | 132.65 ms | 1,317.12 ms |
+| metalplanet_fp32 (all) | 0.34 ms | 0.34 ms | 0.42 ms | 1.13 ms | 9.76 ms |
+| metalplanet_fp64 (all) | 0.42 ms | 1.65 ms | 14.29 ms | 129.14 ms | 1,291.77 ms |
 | pytransit (1) | 0.04 ms | 0.36 ms | 3.55 ms | 35.72 ms | 360.43 ms |
 | pytransit (4) | 0.04 ms | 0.36 ms | 3.55 ms | 35.71 ms | 359.28 ms |
 | pytransit (8) | 0.04 ms | 0.36 ms | 3.59 ms | 35.76 ms | 358.83 ms |
