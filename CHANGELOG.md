@@ -3,6 +3,44 @@
 All notable changes to MetalPlanet. Versioning: semantic-ish
 (MAJOR.MINOR.PATCH); every release is tagged `vX.Y.Z` in git.
 
+## [0.6.0] — 2026-09-28
+
+One model kernel. The dedicated circular kernel is retired; circular
+stays a first-class *mode* (the 8-parameter anvil target, `ecc = 0.0` in
+the frontend) and runs as e = 0 on the transit-anchored eccentric kernel,
+which is exact there (7e-16 against the circular closed form).
+
+### Changed
+- **Circular orbits run on the eccentric kernel, with per-chain fast
+  paths.** A simdgroup-uniform `if (e == 0)` skips the Markley starter
+  and refinement in the forward pass, and skips computing, reducing and
+  storing the seven eccentric-only gradient slots in the VJP. Measured
+  against the retired kernel at 1024 x 65,536, same run: forward
+  **1.07x**, value+grad **1.27x** (without the fast paths it would have
+  been 1.46x / 1.41x); genuinely eccentric chains pay 0.98x — nothing.
+  Flux parity 4e-7 at e = 0 (fp32 operation order) and bit-identical at
+  e = 0.3. That 27% on circular gradients is the deliberate price of one
+  kernel: half the surface for every future photometric fix, and mixed
+  circular/eccentric batches (`TransitModel.light_curves`) for free.
+- `make_model_core_metal(period_ref)` is now the unified factory taking
+  the packed orbit constants; `make_ecc_core_metal` remains as an alias.
+  The `reduce="grid"|"simd"` switch is gone with the kernel it belonged
+  to — the in-kernel `simd_sum` reduction is the only path (its A/B
+  numbers are preserved in `benchmarks/profile_vjp_reduction.py`'s
+  docstring).
+- The frontend's fp32 GPU *circular* path now routes through the kernel
+  too, which is what `docs/frontend-circular-kernel-plan.md` proposed —
+  achieved by unification rather than by a second route. That plan is
+  marked superseded and kept as the record of the road not taken.
+- A "set e = 1e-4" fudge is neither needed nor harmless: measured, it is
+  a real model error scaling linearly with e — 3e-6 at e = 1e-4, above
+  batman's floor. Use exactly zero.
+
+### Removed
+- `_ORBIT` (circular), `_MODEL_VJP_TAIL` (7-slot) and the v2 kernels. The
+  retired kernel is recoverable from git history (the commit before this
+  release) if a fixed-circular workload ever needs the last 27% back.
+
 ## [0.5.0] — 2026-09-27
 
 ### Added

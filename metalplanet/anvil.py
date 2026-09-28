@@ -77,6 +77,7 @@ def make_quad_transit_flux(period_ref: float, analytic_vjp: bool = True,
     if not analytic_vjp:
         core = "autodiff"
     if core == "metal":
+        from .anchored import pack_orbit_constants
         from .metal import (_gpu_stream_active, flux_dev_metal,
                             make_model_core_metal, metal_available)
         graph_fn = _build_graph_model(period_ref, flux_dev_metal)
@@ -85,15 +86,21 @@ def make_quad_transit_flux(period_ref: float, analytic_vjp: bool = True,
         model_core = make_model_core_metal(period_ref)
 
         def flux_dev_fn(v: mx.array, x: mx.array) -> mx.array:
-            # v2 fused path: whole orbit + photometry in one kernel.
-            # Anything the kernel can't serve (fp64, CPU stream — e.g.
-            # anvil's data generation and verification paths) falls back
-            # to the graph model, whose own core falls back below fp32.
+            # Fused path: whole orbit + photometry in one kernel. The
+            # circular MODE is kept (8 parameters, b sampled directly) but
+            # runs on the same kernel as the eccentric model, with
+            # k = h = 0 and cos i = b / a — exact, since the anchored orbit
+            # degenerates to the circular one, and the kernel skips the
+            # Kepler solve on e == 0 chains. Anything the kernel can't
+            # serve (fp64, CPU stream — anvil's data generation and
+            # verification paths) falls back to the graph model.
             if (v.dtype == mx.float32 and x.dtype == mx.float32
                     and _gpu_stream_active()):
                 u1, u2 = q_to_u(v[:, 5], v[:, 6])
-                dev = model_core(x, v[:, 0], v[:, 1], v[:, 2], v[:, 3],
-                                 v[:, 4], u1, u2)
+                zero = mx.zeros_like(v[:, 3])
+                orb = pack_orbit_constants(zero, zero, v[:, 3] / v[:, 4])
+                dev = model_core(x, v[:, 0], v[:, 1], v[:, 2], v[:, 4],
+                                 orb, u1, u2)
                 return v[:, 7:8] + dev
             return graph_fn(v, x)
 
@@ -292,11 +299,11 @@ def make_ecc_transit_flux(period_ref: float, core: str = "metal"):
         return graph_fn
     if core != "metal":
         raise ValueError(f"unknown core {core!r}")
-    from .metal import _gpu_stream_active, make_ecc_core_metal, metal_available
+    from .metal import _gpu_stream_active, make_model_core_metal, metal_available
     if not metal_available():
         return graph_fn
     from .anchored import pack_orbit_constants
-    model_core = make_ecc_core_metal(period_ref)
+    model_core = make_model_core_metal(period_ref)
 
     def flux_dev_fn(v: mx.array, x: mx.array) -> mx.array:
         if (v.dtype == mx.float32 and x.dtype == mx.float32

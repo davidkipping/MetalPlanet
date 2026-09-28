@@ -37,5 +37,5 @@ def timeit(fn, label):
 args = (e, w, a, inc, r, u1, u2)
 tf = timeit(lambda: fwd(*args), "graph eccentric forward (compiled)")
 tg = timeit(lambda: vg(*args), "graph eccentric value+grad (compiled)")
-print(f"\nv2 circular kernel for scale: fwd 20.8 ms, value+grad ~52-60 ms")
-print(f"5x gate implies eccentric kernel fwd <= {tf/5:.1f} ms")
+print(f"\n(for scale, the fused kernel at e=0 measured fwd 20.8 ms, value+grad ~55 ms)")
+print(f"5x gate implies fused kernel fwd <= {tf/5:.1f} ms")

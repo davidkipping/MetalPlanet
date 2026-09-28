@@ -62,7 +62,11 @@ concern.
 Two models are available: `make_quad_transit_flux` (8 parameters,
 circular) and **`make_ecc_transit_flux`** (10 parameters, eccentric:
 `secosw`, `sesinw` replace nothing and `b` is reinterpreted through
-cos i = b (1 + e sin w) / (a (1 - e^2))). Both are fused Metal kernels.
+cos i = b (1 + e sin w) / (a (1 - e^2))). Both run on the **same** fused
+Metal kernel: a circular orbit is e = 0, where the transit-anchored
+formulation is exact and the kernel skips the Kepler solve per chain.
+Keeping circular as a mode costs nothing in code; what it costs in time
+relative to the retired dedicated kernel is in CHANGELOG 0.6.0.
 
 **The eccentric model needs a prior term that the engine cannot give
 you.** Periastron clearance (a(1-e) > 1+r) and a real inclination

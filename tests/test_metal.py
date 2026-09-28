@@ -290,62 +290,42 @@ class TestModelKernel:
 
 
 class TestSimdReduction:
-    """E0: the VJP reduces per-chain gradients inside the kernel via
-    metal::simd_sum over ACTIVE lanes. The 'grid' path (full (n, m)
-    partial arrays + mx.sum) computes identical per-point partials and
-    is kept as the parity oracle."""
+    """The VJP reduces per-chain gradients inside the kernel via
+    metal::simd_sum over ACTIVE lanes; early-exited lanes drop out by
+    themselves and init_value covers fully-exited simdgroups."""
 
     PREF = 3.456
 
-    def _args(self, n, m, span=0.5):
-        dt = np.linspace(-span, span, m).astype(np.float32)
+    @staticmethod
+    def _args(n, m, dt_value=None, span=0.5):
+        from metalplanet.anchored import pack_orbit_constants
+        dt = (np.full(m, dt_value, np.float32) if dt_value is not None
+              else np.linspace(-span, span, m).astype(np.float32))
         x2d = mx.array(np.vstack([dt, np.zeros(m, np.float32)]))
         o = np.ones(n, np.float32)
+        zero = mx.array(0.0 * o)
+        orb = pack_orbit_constants(zero, zero, mx.array(np.float32(0.3 / 8.8) * o))
         return (x2d, mx.array(0.0 * o), mx.array(0.0 * o), mx.array(0.1 * o),
-                mx.array(0.3 * o), mx.array(8.8 * o), mx.array(0.4225 * o),
-                mx.array(0.3077 * o))
-
-    def _grads(self, reduce, args, ct):
-        from metalplanet.metal import make_model_core_metal
-        core = make_model_core_metal(self.PREF, reduce=reduce)
-
-        def f(*p):
-            return mx.sum(core(args[0], *p) * ct)
-
-        g = mx.grad(f, argnums=tuple(range(7)))(*args[1:])
-        return np.array([np.array(v, dtype=np.float64) for v in g])
-
-    @pytest.mark.parametrize("n,m", [(1, 1), (1, 31), (1, 32), (1, 33),
-                                     (3, 255), (3, 256), (3, 257),
-                                     (7, 1000), (9, 4096)])
-    def test_simd_matches_grid(self, n, m):
-        """Partial simdgroups and partial threadgroups: x/32 must track
-        the simdgroup the lane actually sits in."""
-        args = self._args(n, m)
-        ct = mx.array(np.random.default_rng(n * 97 + m)
-                      .standard_normal((n, m)).astype(np.float32))
-        gs = self._grads("simd", args, ct)
-        gg = self._grads("grid", args, ct)
-        assert np.abs(gs - gg).max() / max(np.abs(gg).max(), 1e-30) < 2e-5
+                mx.array(8.8 * o), orb, mx.array(0.4225 * o), mx.array(0.3077 * o))
 
     def test_all_out_of_transit_is_exactly_zero(self):
         """Every lane early-returns, so no simdgroup writes at all: the
         kernel's init_value is what makes the partials read as zero."""
-        m = 512
-        dt = np.full(m, 0.5, np.float32)       # far from any transit
-        x2d = mx.array(np.vstack([dt, np.zeros(m, np.float32)]))
-        o = np.ones(4, np.float32)
-        args = (x2d, mx.array(0.0 * o), mx.array(0.0 * o), mx.array(0.1 * o),
-                mx.array(0.3 * o), mx.array(8.8 * o), mx.array(0.4225 * o),
-                mx.array(0.3077 * o))
-        g = self._grads("simd", args, mx.ones((4, m)))
-        assert np.all(g == 0.0)
+        from metalplanet.metal import make_model_core_metal
+        args = self._args(4, 512, dt_value=0.5)
+        core = make_model_core_metal(self.PREF)
+
+        def f(*p):
+            return mx.sum(core(args[0], *p))
+
+        g = mx.grad(f, argnums=tuple(range(7)))(*args[1:])
+        assert all(np.all(np.array(v) == 0.0) for v in g)
 
     def test_simd_sum_ignores_returned_lanes(self):
         """Pin the MSL semantics the design rests on: simd_sum reduces
         over ACTIVE lanes, so lanes that hit `return` drop out by
         themselves and simd_is_first() picks the lowest surviving lane.
-        Guards against a compiler/runtime change invalidating E0."""
+        Guards against a compiler/runtime change invalidating it."""
         src = """
             uint x = thread_position_in_grid.x;
             if (x >= (uint)npts) return;
@@ -366,17 +346,41 @@ class TestSimdReduction:
         want = float(v[v > 0].sum())
         assert abs(got - want) <= 1e-5 * abs(want)
 
-    def test_forward_is_unaffected(self):
+    def test_mixed_circular_and_eccentric_chains_in_one_batch(self):
+        """The e == 0 fast path is a per-chain branch. A batch mixing
+        circular and eccentric chains must reproduce each chain exactly
+        as it computes alone -- values and gradients."""
+        from metalplanet.anchored import pack_orbit_constants
         from metalplanet.metal import make_model_core_metal
-        args = self._args(8, 1000)
-        a = np.array(make_model_core_metal(self.PREF, reduce="simd")(*args))
-        b = np.array(make_model_core_metal(self.PREF, reduce="grid")(*args))
-        np.testing.assert_array_equal(a, b)
+        core = make_model_core_metal(self.PREF)
+        m = 2048
+        dt = np.linspace(-0.5, 0.5, m).astype(np.float32)
+        x2d = mx.array(np.vstack([dt, np.zeros(m, np.float32)]))
+        es = np.array([0.0, 0.3, 0.0, 0.7, 0.0, 0.05], np.float32)
+        ws = np.array([0.0, 1.1, 0.0, 2.0, 0.0, 4.0], np.float32)
+        n = es.size
+        o = np.ones(n, np.float32)
 
-    def test_rejects_unknown_reduce(self):
-        from metalplanet.metal import make_model_core_metal
-        with pytest.raises(ValueError):
-            make_model_core_metal(self.PREF, reduce="atomic")
+        def pack(e, w):
+            return pack_orbit_constants(mx.array(np.sqrt(e) * np.cos(w)),
+                                        mx.array(np.sqrt(e) * np.sin(w)),
+                                        mx.array(np.float32(0.3 / 8.8) * np.ones_like(e)))
+
+        args = [mx.array(0.004 * o), mx.array(-0.0007 * o), mx.array(0.1 * o),
+                mx.array(8.8 * o), pack(es, ws), mx.array(0.4225 * o),
+                mx.array(0.3077 * o)]
+        ct = mx.array(np.random.default_rng(3).standard_normal((n, m)).astype(np.float32))
+        mixed = np.array(core(x2d, *args), dtype=np.float64)
+        gm = mx.grad(lambda *p: mx.sum(core(x2d, *p) * ct), argnums=tuple(range(7)))(*args)
+        gm = [np.array(v, dtype=np.float64) for v in gm]
+        for j in range(n):                       # each chain alone
+            a1 = [mx.array(np.array(v)[j:j + 1]) for v in args]
+            alone = np.array(core(x2d, *a1), dtype=np.float64)[0]
+            np.testing.assert_array_equal(mixed[j], alone)
+            ga = mx.grad(lambda *p: mx.sum(core(x2d, *p) * ct[j:j + 1]),
+                         argnums=tuple(range(7)))(*a1)
+            for gmv, gav in zip(gm, ga):
+                np.testing.assert_array_equal(np.array(gmv)[j:j + 1], np.array(gav))
 
 
 class TestEccentricKernel:
@@ -393,8 +397,8 @@ class TestEccentricKernel:
 
     @staticmethod
     def _core():
-        from metalplanet.metal import make_ecc_core_metal
-        return make_ecc_core_metal(TestEccentricKernel.PREF)
+        from metalplanet.metal import make_model_core_metal
+        return make_model_core_metal(TestEccentricKernel.PREF)
 
     def _inputs(self, e, wdeg, n=4, m=2048, seed=2, f64=False):
         rng = np.random.default_rng(seed)
@@ -452,15 +456,25 @@ class TestEccentricKernel:
                 np.abs(gr - ref).max(), 5e-7)
 
     def test_exact_circular_limit(self):
-        """e = 0 must reproduce the v2 circular kernel: same orbit, and
-        b = a cos i is the same impact parameter."""
-        from metalplanet.metal import make_model_core_metal
+        """e = 0 takes the kernel's circular fast path and must reproduce
+        the circular closed form -- z^2 = (a sin phi)^2 + (b cos phi)^2
+        with b = a cos i -- evaluated independently in float64."""
         x2d, args = self._inputs(0.0, 0.0, n=4, m=2048)
         t0, pof, r, a, k, h, ci, u1, u2 = args
         ecc = np.array(self._kernel(x2d, *args), dtype=np.float64)
-        circ = np.array(make_model_core_metal(self.PREF)(
-            x2d, t0, pof, r, a * ci, a, u1, u2), dtype=np.float64)
-        assert np.abs(ecc - circ).max() < 5e-7
+        dt = np.array(x2d[0], dtype=np.float64)
+        kk = np.array(x2d[1], dtype=np.float64)
+        P = self.PREF + float(pof[0])
+        tau = dt - (float(t0[0]) + kk * float(pof[0]))
+        tau -= P * np.round(tau / P)
+        phi = 2.0 * math.pi * tau / P
+        b = self.A * self.CI
+        z = np.sqrt((self.A * np.sin(phi)) ** 2 + (b * np.cos(phi)) ** 2)
+        with mx.stream(mx.cpu):
+            f = np.array(flux_dev(mx.array(z, dtype=mx.float64), self.RP,
+                                  self.U1c, self.U2c), dtype=np.float64)
+        ref = np.where((np.cos(phi) > 0) & (z < 1.0 + self.RP), f, 0.0)
+        assert np.abs(ecc[0] - ref).max() < 5e-7
 
     @pytest.mark.parametrize("e,wdeg", [(0.0, 0.0), (1e-4, 90.0),
                                         (0.05, 270.0), (0.3, 90.0),

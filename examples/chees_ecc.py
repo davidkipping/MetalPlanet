@@ -4,7 +4,7 @@ The truth is deliberately LOW eccentricity (e = 0.02). That is where the
 (sqrt(e) cos w, sqrt(e) sin w) parameterization earns its keep — and
 where the direct orbit formulation's float32 gradients are already
 degrading, so it is the honest test of the transit-anchored solve the
-v3 kernel is built on (see metalplanet/anchored.py and
+fused kernel is built on (see metalplanet/anchored.py and
 benchmarks/v3_kh_grad_conditioning.py).
 
 Success = zero divergences and truth recovered within a few sigma.

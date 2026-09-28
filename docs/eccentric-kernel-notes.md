@@ -2,7 +2,10 @@
 
 > Implementation plan (v3 kernel + in-kernel VJP reduction, milestones
 > E0-E5): [v3eccentrickernel_plan.md](v3eccentrickernel_plan.md).
-> **Executed in v0.3.0.** These notes describe the *direct* (E, e, w)
+> **Executed in v0.3.0; since v0.6.0 this is THE model kernel** -- the
+> dedicated circular kernel was retired, a circular orbit being e = 0 on
+> the same kernel with a per-chain fast path. These notes describe the
+> *direct* (E, e, w)
 > formulation that informed the design. The shipped kernel uses the
 > **transit-anchored** formulation instead (`metalplanet/anchored.py`),
 > which is algebraically equivalent — verified to 2.5e-15 in flux — but

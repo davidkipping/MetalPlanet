@@ -1,9 +1,19 @@
 # Plan (not implemented): route the frontend's circular path through the v2 kernel
 
-**Status: designed, deliberately not built.** The measurements below say
-the reward is the weakest of the outstanding items and the risk is the
-highest, so this is written down for whoever revisits it rather than
-executed. Nothing in the codebase depends on it.
+**Status: SUPERSEDED (2026-09-28).** An adversarial review of this plan
+asked a question it had not: does a separate circular *kernel* need to
+exist at all, given the transit-anchored eccentric orbit is exact at
+e = 0? Measured, the eccentric kernel fed e = 0 cost 1.46x/1.41x
+(forward/value+grad) the dedicated circular one -- almost all of it the
+Kepler starter and refinement run as dead work -- and a per-chain
+`if (e == 0)` branch (simdgroup-uniform, so it cannot diverge) recovered
+most of that at ~1% cost to eccentric chains. The decision taken was to
+**keep circular as a first-class mode and retire the circular kernel**:
+one fused kernel now serves both, the frontend's circular path routes
+through it automatically (which is what this plan wanted, without a
+second route), and mixed circular/eccentric batches are free. See
+CHANGELOG 0.6.0 for the measured cost of the unification. The text below
+is kept as the record of the alternative that was *not* chosen.
 
 ## What it would do
 

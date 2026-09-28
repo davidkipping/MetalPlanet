@@ -219,7 +219,7 @@ ORB_COLS = ("ecw", "esw", "es", "ec", "b1", "a2", "b2",
 
 
 def pack_orbit_constants(k, h, ci):
-    """(k, h, ci) -> (n, 11) per-chain constants for the v3 kernel.
+    """(k, h, ci) -> (n, 11) per-chain constants for the fused model kernel.
 
     The last three of the first eight columns feed the Cartesian tail and
     the solve; ``ecc``/``e0``/``mtra`` seed the Markley starter and the

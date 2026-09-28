@@ -288,12 +288,13 @@ class TransitModel:
         return self._photom(z, front, float(params.rp), u1, u2, fp,
                             uvec=uvec)
 
-    def _ecc_kernel_usable(self) -> bool:
-        """The v3 kernel serves the fp32 GPU *primary*-transit path only;
-        fp64, CPU streams and secondary eclipses keep the graph."""
+    def _kernel_usable(self) -> bool:
+        """The fused kernel serves the fp32 GPU *primary*-transit path for
+        both circular and eccentric orbits; fp64, CPU streams, secondary
+        eclipses and polynomial limb darkening keep the graph."""
         if not self.use_metal or self.transittype != "primary":
             return False
-        if self._n_poly:            # the v3 kernel is quadratic-only
+        if self._n_poly:            # the kernel is quadratic-only
             return False
         if self.dtype != mx.float32:
             return False
@@ -360,6 +361,26 @@ class TransitModel:
                 phi = (2.0 * math.pi) * (t - t0) / per
                 z, front = separation_anchored(phi, k, h, a, ci)
                 return self._photom(z, front, rp, None, None, fp, uvec=uv)
+        elif circular and self._kernel_usable():
+            # Circular orbit on the SAME fused kernel as the eccentric one:
+            # k = h = 0 and cos i = b / a. Exact (the anchored orbit
+            # degenerates to the circular one) and the kernel skips the
+            # Kepler solve on e == 0 chains. See the eccentric branch below
+            # for why period_ref is 0 and the period rides p_off.
+            from .anchored import pack_orbit_constants
+            from .metal import make_model_core_metal
+            core = make_model_core_metal(0.0)
+            m = t.shape[0]
+            xdat = mx.stack([t, mx.zeros_like(t)])
+
+            def raw(t0, per, a, b, rp, u1, u2, fp):
+                def col(v):
+                    return mx.reshape(v, (1,))
+                zero = mx.zeros((1,), dtype=self.dtype)
+                orb = pack_orbit_constants(zero, zero, col(b / a))
+                dev = core(xdat, col(t0), col(per), col(rp), col(a), orb,
+                           col(u1), col(u2))
+                return 1.0 + mx.reshape(dev, (m,))
         elif circular:
             def raw(t0, per, a, b, rp, u1, u2, fp):
                 phase = (2.0 * math.pi) * (t - t0) / per
@@ -367,12 +388,11 @@ class TransitModel:
                 z = mx.sqrt(mx.maximum((a * sphi) ** 2 + (b * cphi) ** 2,
                                        1e-24))
                 return self._photom(z, cphi > 0.0, rp, u1, u2, fp)
-        elif self._ecc_kernel_usable():
+        elif self._kernel_usable():
             # Whole eccentric model in one kernel. The anchored Kepler
             # solve as graph ops streams a lot of intermediates: measured
             # 0.23 Gpt/s against the kernel's 2.3, so this is ~10x at
-            # large N (the circular branch above is already within 1.4x
-            # of its kernel and is left alone).
+            # large N.
             #
             # period_ref is baked into the kernel factory as a constant,
             # which would defeat batman-style parameter updates — so it
@@ -382,8 +402,8 @@ class TransitModel:
             # dphi/dp_off = 2 pi ((-k - n_w) P - tau_w) / P^2 reduces to
             # dphi/dP for k = 0.
             from .anchored import pack_orbit_constants
-            from .metal import make_ecc_core_metal
-            core = make_ecc_core_metal(0.0)
+            from .metal import make_model_core_metal
+            core = make_model_core_metal(0.0)
             m = t.shape[0]
             xdat = mx.stack([t, mx.zeros_like(t)])
 
