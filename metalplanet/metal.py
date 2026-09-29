@@ -38,11 +38,14 @@ anvil's CPU data generation rely on this).
 
 from __future__ import annotations
 
+import math
+
 import mlx.core as mx
+import numpy as np
 
 from .vjp import _unbroadcast, flux_dev_analytic
 
-__all__ = ["flux_dev_metal", "metal_available",
+__all__ = ["flux_dev_metal", "flux_dev_from_tau", "metal_available",
            "make_model_core_metal", "make_ecc_core_metal"]
 
 _EPS = "1.1920929e-07f"
@@ -556,6 +559,263 @@ PHOT_PARTIALS
 _MODEL_VJP_SRC = _model_src("return;", _MODEL_VJP_TAIL).replace(
     "NGRAD_C", f"{NGRAD}u")
 
+# ---------------------------------------------------------------------------
+# tau-input kernel with in-kernel exposure integration (flux_dev_from_tau)
+#
+# The existing kernels evaluate ONE point per thread. Integrating a finite
+# exposure means evaluating many sub-exposure nodes per output point, and the
+# whole reason to do it in-kernel is that those nodes never become an MLX
+# array: a caller that expands them pays n_sub x the memory in every forward
+# intermediate and every gradient grid.
+#
+# That requires the photometric core as a callable device FUNCTION rather than
+# an inlined straight-line fragment. _PHOT is already pure in (z, r, u1, u2)
+# with no early return, so it wraps verbatim -- the numerics below are the
+# same text the other kernels compile, not a reimplementation.
+# ---------------------------------------------------------------------------
+
+_PHOT_FN = """
+inline float mp_phot(float z, float r, float u1, float u2) {
+    // the photometric core assumes an overlap: out of transit is exactly
+    // zero and must be short-circuited here, because the early exit that
+    // does this in the point kernels lives in their ORBIT fragment.
+    if (z >= 1.0f + r) return 0.0f;
+PHOT_BODY
+    return fdev;
+}
+
+// fdev plus the four analytic partials, for the backward pass
+inline float mp_phot_d(float z, float r, float u1, float u2,
+                       thread float *dFdz, thread float *dFdr,
+                       thread float *dFdu1, thread float *dFdu2) {
+    if (z >= 1.0f + r) {
+        *dFdz = 0.0f; *dFdr = 0.0f; *dFdu1 = 0.0f; *dFdu2 = 0.0f;
+        return 0.0f;
+    }
+PHOT_BODY
+PHOT_PARTIALS
+    *dFdz  = (gc0 * ds0dz + gc1 * ds1dz + gc2 * ds2dz) * inv_norm;
+    *dFdr  = (gc0 * ds0dr + gc1 * ds1dr + gc2 * ds2dr) * inv_norm;
+    *dFdu1 = (s1d - s0d) * inv_norm + fdev * (MP_PI / 3.0f) * inv_norm;
+    *dFdu2 = (-1.5f * s0d + 2.0f * s1d - 0.25f * s2d) * inv_norm
+             + fdev * (MP_PI / 6.0f) * inv_norm;
+    return fdev;
+}
+
+// z(tau) for a circular orbit, matching orbit.separation_circular: the
+// far side is pushed beyond contact rather than mirrored.
+inline float mp_z_of_tau(float tau, float per, float a, float b,
+                         thread float *sphi, thread float *cphi) {
+    float phi = MP_TWO_PI * tau / per;
+    *sphi = metal::precise::sin(phi);
+    *cphi = metal::precise::cos(phi);
+    float as_ = a * (*sphi);
+    float bc_ = b * (*cphi);
+    float z2 = as_ * as_ + bc_ * bc_;
+    return metal::precise::sqrt(max(z2, KITE_FLOOR));
+}
+"""
+
+
+def _phot_header() -> str:
+    return _subst(_PHOT_FN.replace("PHOT_BODY", _PHOT))
+
+
+# Integration modes, shared with the Python wrapper.
+_INT_NONE, _INT_CONTACT, _INT_SUPER = 0, 1, 2
+
+# Shared preamble: indices, per-chain parameters, and the exposure window.
+_TAU_HEAD = """
+    uint x = thread_position_in_grid.x;
+    uint y = thread_position_in_grid.y;
+    if (x >= (uint)npts) return;
+    uint i = y * (uint)npts + x;
+
+    float tau0 = taui[i];
+    float per = perin[y];
+    float av  = ain[y];
+    float bv  = bin[y];
+    float r   = rin[y];
+    float u1  = u1in[y];
+    float u2  = u2in[y];
+    float hw_exp = 0.5f * expt;
+"""
+
+# The contact-split window. Contacts arrive per chain in TAU units and are
+# ordered; clamping into [t1, t2] preserves that order, so an interval whose
+# contact lies outside the window simply has zero width and contributes
+# nothing -- the branchless five-interval split, same as exposure.py.
+#
+# d(edge)/d(tau0) is 0 or 1 and nothing else: the window ends move with the
+# point, an interior contact does not. That is what makes the exact
+# derivative of the QUADRATURE (not merely of the integral it approximates)
+# cheap enough to do in-kernel.
+_TAU_EDGES = """
+    float t1 = tau0 - hw_exp, t2 = tau0 + hw_exp;
+    float edge[6]; float dedge[6];
+    edge[0] = t1;  dedge[0] = 1.0f;
+    edge[5] = t2;  dedge[5] = 1.0f;
+    for (int c = 0; c < 4; ++c) {
+        float ct_ = cs[y * 4u + (uint)c];
+        float e = ct_ < t1 ? t1 : (ct_ > t2 ? t2 : ct_);
+        edge[c + 1] = e;
+        dedge[c + 1] = (ct_ < t1 || ct_ > t2) ? 1.0f : 0.0f;
+    }
+"""
+
+_TAU_FWD_SRC = _TAU_HEAD + """
+    float sphi, cphi, z, acc;
+    if (mode == MODE_NONE) {
+        z = mp_z_of_tau(tau0, per, av, bv, &sphi, &cphi);
+        out[i] = (cphi <= 0.0f) ? 0.0f : mp_phot(z, r, u1, u2);
+        return;
+    }
+    if (mode == MODE_SUPER) {
+        acc = 0.0f;
+        for (int j = 0; j < nsub; ++j) {
+            float frac = (nsub == 1) ? 0.5f
+                                     : (float)j / (float)(nsub - 1);
+            float tt = t1_of(tau0, hw_exp) + 2.0f * hw_exp * frac;
+            z = mp_z_of_tau(tt, per, av, bv, &sphi, &cphi);
+            acc += (cphi <= 0.0f) ? 0.0f : mp_phot(z, r, u1, u2);
+        }
+        out[i] = acc / (float)nsub;
+        return;
+    }
+""" + _TAU_EDGES + """
+    float A = 0.0f, S = 0.0f;
+    for (int iv = 0; iv < 5; ++iv) {
+        float lo = edge[iv], hi = edge[iv + 1];
+        float mid = 0.5f * (lo + hi), hw = 0.5f * (hi - lo);
+        for (int j = 0; j < ngl; ++j) {
+            float w = hw * wg[j];
+            float tt = mid + hw * xg[j];
+            z = mp_z_of_tau(tt, per, av, bv, &sphi, &cphi);
+            float f = (cphi <= 0.0f) ? 0.0f : mp_phot(z, r, u1, u2);
+            A += w * f;
+            S += w;
+        }
+    }
+    out[i] = (S > 0.0f) ? (A / S) : 0.0f;
+"""
+
+# Backward. Per-point gradient in tau (full shape, like flux_dev_metal's gz);
+# per-chain gradients in (per, a, b, r, u1, u2), reduced in-kernel by
+# simd_sum over the ACTIVE lanes exactly as the model VJP does.
+#
+# dz/dtau  = [(a^2 - b^2) sin phi cos phi / z] (2 pi / per)
+# df/dper  = -(df/dtau) * tt / per       (the same chain, reused)
+# dz/da    = a sin^2 phi / z ,  dz/db = b cos^2 phi / z
+_TAU_PAR = ("per", "a", "b", "r", "u1", "u2")
+NTAUPAR = len(_TAU_PAR)
+
+_TAU_VJP_SRC = _TAU_HEAD + """
+    float ctv = ct[i];
+    float sphi, cphi, z, dFdz, dFdr, dFdu1, dFdu2;
+    float p_per = 0.0f, p_a = 0.0f, p_b = 0.0f;
+    float p_r = 0.0f, p_u1 = 0.0f, p_u2 = 0.0f;
+    float g_tau = 0.0f;
+
+    if (mode == MODE_NONE || mode == MODE_SUPER) {
+        int n_node = (mode == MODE_NONE) ? 1 : nsub;
+        float scale = 1.0f / (float)n_node;
+        for (int j = 0; j < n_node; ++j) {
+            float tt;
+            if (mode == MODE_NONE) {
+                tt = tau0;
+            } else {
+                float frac = (nsub == 1) ? 0.5f
+                                         : (float)j / (float)(nsub - 1);
+                tt = t1_of(tau0, hw_exp) + 2.0f * hw_exp * frac;
+            }
+            z = mp_z_of_tau(tt, per, av, bv, &sphi, &cphi);
+            if (cphi <= 0.0f) continue;
+            mp_phot_d(z, r, u1, u2, &dFdz, &dFdr, &dFdu1, &dFdu2);
+            float zi = (z > 0.0f) ? (1.0f / z) : 0.0f;
+            float dzdphi = (av * av - bv * bv) * sphi * cphi * zi;
+            float dfdtau = dFdz * dzdphi * (MP_TWO_PI / per);
+            g_tau += ctv * scale * dfdtau;
+            p_per += ctv * scale * (-dfdtau * tt / per);
+            p_a   += ctv * scale * dFdz * (av * sphi * sphi * zi);
+            p_b   += ctv * scale * dFdz * (bv * cphi * cphi * zi);
+            p_r   += ctv * scale * dFdr;
+            p_u1  += ctv * scale * dFdu1;
+            p_u2  += ctv * scale * dFdu2;
+        }
+    } else {
+""" + _TAU_EDGES + """
+        // accumulate the quadrature AND its exact derivative in tau0
+        float A = 0.0f, S = 0.0f, dA = 0.0f, dS = 0.0f;
+        float a_per = 0.0f, a_a = 0.0f, a_b = 0.0f;
+        float a_r = 0.0f, a_u1 = 0.0f, a_u2 = 0.0f;
+        for (int iv = 0; iv < 5; ++iv) {
+            float lo = edge[iv], hi = edge[iv + 1];
+            float dlo = dedge[iv], dhi = dedge[iv + 1];
+            float mid = 0.5f * (lo + hi), hw = 0.5f * (hi - lo);
+            float dmid = 0.5f * (dlo + dhi), dhw = 0.5f * (dhi - dlo);
+            for (int j = 0; j < ngl; ++j) {
+                float w = hw * wg[j];
+                float dw = dhw * wg[j];
+                float tt = mid + hw * xg[j];
+                float dtt = dmid + dhw * xg[j];
+                z = mp_z_of_tau(tt, per, av, bv, &sphi, &cphi);
+                float f = 0.0f, dfdtt = 0.0f;
+                if (cphi > 0.0f) {
+                    f = mp_phot_d(z, r, u1, u2, &dFdz, &dFdr, &dFdu1, &dFdu2);
+                    float zi = (z > 0.0f) ? (1.0f / z) : 0.0f;
+                    float dzdphi = (av * av - bv * bv) * sphi * cphi * zi;
+                    dfdtt = dFdz * dzdphi * (MP_TWO_PI / per);
+                    // parameter partials integrate with the SAME rule; the
+                    // true integral does not depend on where it is split, so
+                    // the contacts' own parameter dependence is not chased.
+                    a_per += w * (-dfdtt * tt / per);
+                    a_a   += w * dFdz * (av * sphi * sphi * zi);
+                    a_b   += w * dFdz * (bv * cphi * cphi * zi);
+                    a_r   += w * dFdr;
+                    a_u1  += w * dFdu1;
+                    a_u2  += w * dFdu2;
+                }
+                A += w * f;   S += w;
+                dA += dw * f + w * dfdtt * dtt;
+                dS += dw;
+            }
+        }
+        if (S > 0.0f) {
+            float inv = 1.0f / S;
+            g_tau = ctv * (dA * S - A * dS) * inv * inv;
+            p_per = ctv * a_per * inv;  p_a  = ctv * a_a  * inv;
+            p_b   = ctv * a_b   * inv;  p_r  = ctv * a_r  * inv;
+            p_u1  = ctv * a_u1  * inv;  p_u2 = ctv * a_u2 * inv;
+        }
+    }
+
+    gtau[i] = g_tau;
+    p_per = metal::simd_sum(p_per);
+    p_a   = metal::simd_sum(p_a);
+    p_b   = metal::simd_sum(p_b);
+    p_r   = metal::simd_sum(p_r);
+    p_u1  = metal::simd_sum(p_u1);
+    p_u2  = metal::simd_sum(p_u2);
+    if (metal::simd_is_first()) {
+        uint ngrp = ((uint)npts + 31u) / 32u;
+        uint o = y * NTAUPAR_C * ngrp + x / 32u;
+        gpar[o + 0u * ngrp] = p_per;
+        gpar[o + 1u * ngrp] = p_a;
+        gpar[o + 2u * ngrp] = p_b;
+        gpar[o + 3u * ngrp] = p_r;
+        gpar[o + 4u * ngrp] = p_u1;
+        gpar[o + 5u * ngrp] = p_u2;
+    }
+"""
+
+
+def _tau_src(body: str) -> str:
+    return _subst(body).replace("MODE_NONE", str(_INT_NONE)).replace(
+        "MODE_SUPER", str(_INT_SUPER)).replace(
+        "NTAUPAR_C", f"{NTAUPAR}u").replace(
+        "t1_of(tau0, hw_exp)", "(tau0 - hw_exp)")
+
+
 _kernels: dict = {}
 _metal_ok: bool | None = None
 
@@ -656,6 +916,22 @@ def make_model_core_metal(period_ref: float):
 make_ecc_core_metal = make_model_core_metal
 
 
+def _get_tau_kernels():
+    if "tau_fwd" not in _kernels:
+        ins = ["taui", "perin", "ain", "bin", "rin", "u1in", "u2in", "cs",
+               "xg", "wg", "expt", "mode", "ngl", "nsub", "npts"]
+        _kernels["tau_fwd"] = mx.fast.metal_kernel(
+            name="mp_tau_fwd", input_names=ins, output_names=["out"],
+            header=_HEADER + _phot_header(),
+            source=_tau_src(_TAU_FWD_SRC))
+        _kernels["tau_vjp"] = mx.fast.metal_kernel(
+            name="mp_tau_vjp", input_names=ins[:-1] + ["ct", "npts"],
+            output_names=["gtau", "gpar"],
+            header=_HEADER + _phot_header(),
+            source=_tau_src(_TAU_VJP_SRC))
+    return _kernels
+
+
 def metal_available() -> bool:
     """Probe: can the fused kernel actually run on this machine?"""
     global _metal_ok
@@ -691,7 +967,8 @@ def _canon_param(p, n, dtype):
         return q
     if q.shape[0] == 1:
         return mx.broadcast_to(q, (n,))
-    raise ValueError("parameter shape incompatible with z")
+    raise ValueError(f"parameter shape {p.shape} incompatible "
+                     f"with a leading axis of {n}")
 
 
 @mx.custom_function
@@ -743,3 +1020,222 @@ def flux_dev_metal(z: mx.array, r, u1, u2) -> mx.array:
 
     out = _flux_dev_metal_core(z2d, rc, u1c, u2c)
     return out[0] if squeeze and n == 1 else out
+
+
+# ---------------------------------------------------------------------------
+# flux_dev_from_tau: the tau-input entry point
+# ---------------------------------------------------------------------------
+
+_INT_MODES = {"none": _INT_NONE, "contact": _INT_CONTACT,
+              "supersample": _INT_SUPER}
+
+
+def _contact_taus(r, a, b, period, n):
+    """The four contact times as offsets from mid-transit, per chain.
+
+    ``contact_offsets`` works in orbital phase; the kernel wants tau, so the
+    conversion is period / 2 pi. Done here rather than in the kernel because
+    it is per-chain work, and detached because the contacts are *interior*
+    split points of a continuous integrand: moving one adds +f(c) dc and
+    -f(c) dc to the two intervals it separates, which cancel exactly. So
+    the exact integral does not depend on where it is split, and neither
+    parameter gradients nor the tau gradient need to chase the contacts.
+    (The window *ends* are a different matter -- those are genuine Leibniz
+    boundary terms, and the kernel carries them in ``dedge``.)
+    """
+    from .exposure import contact_offsets
+    cs = contact_offsets(r, a, b)
+    scale = period / (2.0 * math.pi)
+    cols = [mx.reshape(mx.broadcast_to(c * scale, (n,)), (n, 1)) for c in cs]
+    return mx.stop_gradient(mx.concatenate(cols, axis=1))
+
+
+def _tau_graph(tau, period, a, b, r, u1, u2, exp_time, mode, n_gl, n_sub):
+    """The MLX-graph equivalent of the kernel, used for fp64, the CPU
+    stream, and any machine where the kernel probe fails.
+
+    turin needs this for anvil's ``validate_precision`` and ``certify``, so
+    it is a supported path and not a fallback of last resort: it computes
+    the *same function*, including detaching the contacts, so that the two
+    paths' gradients agree and not merely their values.
+    """
+    from .exposure import contact_offsets, exposure_nodes
+    from .orbit import separation_circular
+    from .vjp import flux_dev_analytic
+
+    def inst(tt):
+        return flux_dev_analytic(separation_circular(tt, period, b, a),
+                                 r, u1, u2)
+
+    if mode == _INT_NONE or exp_time == 0.0:
+        return inst(tau)
+    half = 0.5 * exp_time
+    if mode == _INT_SUPER:
+        off = (np.linspace(-half, half, int(n_sub)) if n_sub > 1
+               else np.zeros(1))
+        nodes = tau[..., None] + mx.array(off, dtype=tau.dtype)
+        return mx.mean(inst(nodes), axis=-1)
+    # contact: exposure_nodes owns the branchless five-interval split.
+    # tau is measured from each point's own mid-transit, so t0 = 0.
+    #
+    # The period is detached HERE and only here: exposure_nodes converts
+    # the contact *phases* to times with period / 2 pi, which would make
+    # the split points move with the period while the kernel's are frozen.
+    # Both are valid gradients of the same model -- a split point is
+    # interior, so moving it adds +f(c) dc and -f(c) dc -- but they are not
+    # the same function, and turin certifies in fp64 what it runs in fp32.
+    # The period keeps its gradient where it belongs: in the phase.
+    cs = tuple(mx.stop_gradient(c) for c in contact_offsets(r, a, b))
+    T, W = exposure_nodes(tau, tau * 0.0, mx.stop_gradient(period),
+                          exp_time, cs, int(n_gl), dtype=tau.dtype)
+    return mx.sum(inst(T) * W, axis=-1)
+
+
+def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1, u2, *,
+                      exp_time: float = 0.0, integration: str = "contact",
+                      n_gl: int = 5, n_sub: int = 1) -> mx.array:
+    """F - 1 from time-since-mid-transit, with the exposure integrated
+    *inside* the kernel.
+
+    ``tau`` is (n_chains, m) or (m,): each point's time relative to **its
+    own** mid-transit. That is the difference from ``make_quad_transit_flux``,
+    whose kernel derives the time from a linear ephemeris and therefore
+    returns a zero gradient for it -- a caller sampling per-epoch mid-times
+    (TTVs) cannot express its model that way. Here ``tau`` is an ordinary
+    differentiable input: build it however the parameterisation requires and
+    MLX chains the rest, which keeps this package out of the business of
+    knowing about TTVs or anyone's parameter vector.
+
+    The exposure rule runs per output point *in registers*, so the
+    sub-exposure axis never becomes an MLX array. A caller that expands it
+    instead pays ``n_sub`` times the memory in every forward intermediate
+    and in every gradient grid.
+
+    Args:
+        tau: (n, m) or (m,) times since each point's own mid-transit, in the
+            same units as ``period``. Expected to lie within half a period
+            of it -- that is what "its own" means.
+        period, a, b, r, u1, u2: scalars or (n,), broadcast per chain as
+            ``flux_dev_metal`` does. ``a`` is a/R*, ``b`` the impact
+            parameter, ``r`` = Rp/R*, ``u1``/``u2`` quadratic limb darkening.
+        exp_time: exposure duration in tau's units; 0 means instantaneous
+            (and forces ``integration="none"``).
+        integration: ``"contact"`` -- Gauss-Legendre on the exposure window
+            split at the four contact times, which MetalPlanet's own numbers
+            make strictly better per evaluation than supersampling (25 evals
+            for 8.9e-8 against 101 for 1.7e-5 on a 29-minute exposure);
+            ``"supersample"`` -- ``n_sub`` uniform nodes, batman's rule;
+            ``"none"`` -- instantaneous.
+        n_gl: Gauss-Legendre nodes per sub-interval. The window always has
+            five sub-intervals, so the cost is 5 * n_gl evaluations.
+        n_sub: number of nodes for ``"supersample"``.
+
+    Returns:
+        (n, m) -- or (m,) for 1-D ``tau`` and no per-chain parameters -- of
+        F - 1, exposure-averaged. Exactly 0 out of transit, as
+        ``flux_dev_metal`` is.
+
+    Gradients flow in ``tau`` and in all six parameters. fp64, the CPU
+    stream, and machines without a usable Metal device take the MLX graph
+    path, which computes the same function.
+    """
+    mode = _INT_MODES.get(integration)
+    if mode is None:
+        raise ValueError(f"integration must be one of {sorted(_INT_MODES)}; "
+                         f"got {integration!r}")
+    if int(n_gl) < 1 or int(n_sub) < 1:
+        raise ValueError("n_gl and n_sub must be >= 1")
+    if float(exp_time) < 0.0:
+        raise ValueError("exp_time must be >= 0")
+    if float(exp_time) == 0.0:
+        mode = _INT_NONE
+    return _flux_dev_from_tau_impl(tau, period, a, b, r, u1, u2,
+                                   float(exp_time), mode, int(n_gl),
+                                   int(n_sub))
+
+
+def _flux_dev_from_tau_impl(tau, period, a, b, r, u1, u2, exp_time, mode,
+                            n_gl, n_sub):
+    if not isinstance(tau, mx.array):
+        tau = mx.array(tau)
+    if tau.ndim not in (1, 2):
+        raise ValueError(f"tau must be (m,) or (n, m); got {tau.shape}")
+    if tau.dtype == mx.float64 and _gpu_stream_active():
+        # MLX has no float64 on Metal *at all* -- even a slice raises -- so
+        # fp64 is not a dispatch choice here but a device one. Putting it on
+        # the CPU stream ourselves is what makes "fp64 falls back to the
+        # graph path" true rather than an exception the caller has to know
+        # to pre-empt; TransitModel does the same (api.py: _stream).
+        with mx.stream(mx.cpu):
+            return _flux_dev_from_tau_impl(tau, period, a, b, r, u1, u2,
+                                           exp_time, mode, n_gl, n_sub)
+    squeeze = tau.ndim == 1
+    tau2d = tau[None, :] if squeeze else tau
+    params = (period, a, b, r, u1, u2)
+    n_param = max((p.shape[0] if isinstance(p, mx.array) and p.ndim >= 1
+                   else 1) for p in params)
+    n = max(tau2d.shape[0], n_param)
+    # a parameter carrying a different float width than tau would reach
+    # the kernel as a mismatched input; tau sets the precision
+    pc = [_canon_param(p, n, tau2d.dtype).astype(tau2d.dtype)
+          for p in params]
+    if tau2d.shape[0] != n:
+        tau2d = mx.broadcast_to(tau2d, (n, tau2d.shape[1]))
+
+    if (tau2d.dtype == mx.float32 and _gpu_stream_active()
+            and metal_available()):
+        out = _make_tau_core(exp_time, mode, n_gl, n_sub)(tau2d, *pc)
+    else:
+        # the graph path broadcasts over points, so per-chain parameters
+        # have to carry the trailing axis the kernel gets for free
+        pg = [mx.reshape(p, (n, 1)) for p in pc]
+        out = _tau_graph(tau2d, *pg, exp_time, mode, n_gl, n_sub)
+    return out[0] if squeeze and n == 1 else out
+
+
+_tau_cores: dict = {}
+
+
+def _make_tau_core(exp_time, mode, n_gl, n_sub):
+    """One custom_function per (exposure, mode, order) so the VJP closes
+    over them; cached because building it per call would defeat compile."""
+    key = (float(exp_time), int(mode), int(n_gl), int(n_sub))
+    if key in _tau_cores:
+        return _tau_cores[key]
+    from .exposure import gauss_legendre
+    xg_np, wg_np = gauss_legendre(n_gl)
+
+    def _static(dtype):
+        return mx.array(xg_np, dtype=dtype), mx.array(wg_np, dtype=dtype)
+
+    @mx.custom_function
+    def core(tau2d, period, a, b, r, u1, u2):
+        n, m = tau2d.shape
+        xg, wg = _static(tau2d.dtype)
+        cs = _contact_taus(r, a, b, period, n)
+        k = _get_tau_kernels()["tau_fwd"]
+        return k(inputs=[tau2d, period, a, b, r, u1, u2, cs, xg, wg,
+                         exp_time, mode, n_gl, n_sub, int(m)],
+                 output_shapes=[(n, m)], output_dtypes=[mx.float32],
+                 grid=(m, n, 1), threadgroup=(256, 1, 1))[0]
+
+    @core.vjp
+    def core_vjp(primals, cotangent, output):
+        tau2d, period, a, b, r, u1, u2 = primals
+        ct = cotangent if isinstance(cotangent, mx.array) else cotangent[0]
+        n, m = tau2d.shape
+        cols = (m + 31) // 32
+        xg, wg = _static(tau2d.dtype)
+        cs = _contact_taus(r, a, b, period, n)
+        k = _get_tau_kernels()["tau_vjp"]
+        gtau, gpar = k(
+            inputs=[tau2d, period, a, b, r, u1, u2, cs, xg, wg, exp_time,
+                    mode, n_gl, n_sub, ct, int(m)],
+            output_shapes=[(n, m), (n, NTAUPAR, cols)],
+            output_dtypes=[mx.float32] * 2, init_value=0.0,
+            grid=(m, n, 1), threadgroup=(256, 1, 1))
+        g = mx.sum(gpar, axis=2)
+        return (gtau, g[:, 0], g[:, 1], g[:, 2], g[:, 3], g[:, 4], g[:, 5])
+
+    _tau_cores[key] = core
+    return core

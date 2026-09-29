@@ -6,6 +6,36 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 ## [Unreleased]
 
 ### Added
+- **`flux_dev_from_tau`** — a `tau`-input entry point with the exposure
+  integration *inside* the kernel, requested by
+  [turin](../turin/docs/upstream/metalplanet_prompt.md) (Kepler/TESS
+  fitting with per-transit mid-times). Two gaps it closes. First, the
+  fused model kernel treats times as data and returns a zero gradient for
+  them, so a sampler fitting TTVs — a mid-time per epoch, sampled jointly
+  with the shape parameters — could not use it; here `tau` is an ordinary
+  differentiable input and the VJP returns `d(F)/d(tau)` alongside all six
+  parameter gradients. Second, exposure integration existed only on the
+  batman-style frontend, never on the path a sampler takes.
+
+  The rule runs per output point in registers, so the sub-exposure axis
+  never becomes an MLX array. At 512 chains x 5,000 points x 15
+  sub-exposures: 2.8x forward and 3.6x value+grad on the *same*
+  arithmetic, with peak memory 2776 MB -> 51 MB (55x), and the contact
+  rule (25 evaluations) beats the 15-node expanded route on speed *and* is
+  ~1,200x more accurate. Matched to 1e-6 the ratio is 30-57x, because
+  supersampling converges as O(1/N) and needs n_sub ~ 2,271 — ~368 GB at
+  512 chains. `benchmarks/bench_tau_kernel.py`, `tests/test_tau_kernel.py`.
+
+  The fp64 / CPU / no-Metal graph path computes the same *function*, not
+  merely the same value: both freeze the quadrature's split points, so a
+  gradient certified in fp64 is the gradient that runs in fp32. (Freezing
+  is exact, not an approximation — a split point is interior to a
+  continuous integrand, so moving it adds +f(c)dc and -f(c)dc, which
+  cancel. The window *ends* are genuine Leibniz boundary terms and the
+  kernel carries them.) Getting there needed one fix: `exposure_nodes`
+  converts contact *phases* to times with `period / 2 pi`, which leaked a
+  period dependence into the split points that the kernel did not have —
+  worth 9e-4 relative on `d/d(period)`, 2,000x the fp32 noise floor.
 - **`notebooks/02_joint_transit_and_gp.ipynb`** — fitting a transit and
   correlated stellar variability *together*: MetalPlanet as anvil-gp's mean
   model, a SHO Gaussian process over the residual, and anvil sampling all

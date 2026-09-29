@@ -200,6 +200,52 @@ Matching the 25-evaluation result with uniform supersampling would take
 N ~ 19,500 — about 780x the model evaluations. `supersample_factor`
 remains the default for batman parity.
 
+## Sampling per-transit times: `flux_dev_from_tau`
+
+The fused model kernel (`make_quad_transit_flux`) derives each point's
+phase from a linear ephemeris, so *times are data* there and its VJP
+returns zero for them. A sampler fitting **per-transit mid-times** — TTVs,
+30-80 of them sampled jointly with the shape parameters — cannot express
+its model that way. `flux_dev_from_tau` is the entry point for that case:
+
+```python
+from metalplanet import flux_dev_from_tau
+
+# tau: (n_chains, m) time since each point's OWN mid-transit, built
+# however the parameterisation requires -- MLX chains the rest
+dev = flux_dev_from_tau(tau, period, a, b, r, u1, u2,
+                        exp_time=29.4 / 60 / 24,   # Kepler long cadence
+                        integration="contact", n_gl=5)
+flux = 1.0 + dev
+```
+
+Gradients flow in `tau` **and** in all six parameters. The exposure rule
+runs per output point in registers, so the sub-exposure axis never becomes
+an MLX array — which is the whole point. Expanding it instead multiplies
+every forward intermediate and every gradient grid by the number of
+sub-exposures. At 512 chains x 5,000 points x 15 sub-exposures
+(`benchmarks/bench_tau_kernel.py`, M2 Max), against
+`separation_circular` + `flux_dev_metal` + averaging outside the kernel:
+
+| | forward | value+grad | peak memory (value+grad) |
+|---|---:|---:|---:|
+| expanded sub-exposure axis | 41.0 ms | 99.7 ms | 2776 MB |
+| same rule, in-kernel (n_sub=15) | 14.5 ms (**2.8x**) | 28.0 ms (**3.6x**) | 51 MB (**55x**) |
+| contact rule, in-kernel (n_gl=5) | 24.4 ms (**1.7x**) | 43.9 ms (**2.3x**) | 51 MB (**55x**) |
+
+The third row is both faster than the route it replaces and ~1,200x more
+accurate than it (1.3e-7 against 1.6e-4, vs an fp64 reference). Reaching
+1e-6 by supersampling needs n_sub ~ 2,271, which at 512 chains would ask
+for ~368 GB; measured where both fit, the contact kernel is 30-57x faster
+on 160-517x less memory.
+
+`integration="none"` is `separation_circular` + `flux_dev_metal` with
+tau -> z folded in, agreeing with it to the standing 5e-7 kernel-vs-graph
+tolerance. fp64, the CPU stream, and machines without a usable Metal
+device take an MLX graph path that computes the *same* function —
+including freezing the quadrature's split points, so a gradient certified
+in fp64 is the gradient that runs in fp32.
+
 ## Numerical notes worth knowing
 
 * Regime selection is `mx.where` masks with *both-branch sanitization*:
