@@ -5,6 +5,28 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+### Fixed
+- **`flux_dev_from_tau`'s graph path could not batch chains.** Reported by
+  turin, who hit it on the fp64 reference path and worked around it by
+  looping chain-by-chain (that workaround can go). With `n_chains > 1` and
+  `integration="contact"` or `"supersample"`, any parameter spelling --
+  including scalars -- raised `[broadcast_shapes] Shapes (n,1) and
+  (n,m,k) cannot be broadcast`. Each exposure rule appends a node axis to
+  the times, but the parameters were shaped `(n, 1)` regardless; that
+  broadcasts against anything when `n == 1` and against nothing when it is
+  not. How many trailing axes the parameters need is a property of the
+  rule, so `_tau_graph` now derives it there.
+
+  The fp32 kernel was unaffected -- it indexes parameters by chain rather
+  than broadcasting -- which is why it never showed. The test matrix had
+  the same blind spot: every fp64 test used a 1-D `tau`, so `n` was always
+  1, and the `n > 1` cases were all behind the Metal skip. 60 tests added
+  that run the graph at `n` in {1, 2, 4, 33} across all three rules, both
+  precisions and both parameter spellings, and check that row `j` is what
+  chain `j`'s parameters produce alone -- on chains deliberately made
+  distinct, since shapes that broadcast are not automatically shapes that
+  broadcast correctly. 455 tests green.
+
 ### Added
 - **`flux_dev_from_tau`** — a `tau`-input entry point with the exposure
   integration *inside* the kernel, requested by

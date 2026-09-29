@@ -1058,23 +1058,39 @@ def _tau_graph(tau, period, a, b, r, u1, u2, exp_time, mode, n_gl, n_sub):
     it is a supported path and not a fallback of last resort: it computes
     the *same function*, including detaching the contacts, so that the two
     paths' gradients agree and not merely their values.
+
+    ``tau`` is (n, m); the parameters arrive as (n,), one per chain.
     """
     from .exposure import contact_offsets, exposure_nodes
     from .orbit import separation_circular
     from .vjp import flux_dev_analytic
 
-    def inst(tt):
-        return flux_dev_analytic(separation_circular(tt, period, b, a),
-                                 r, u1, u2)
+    pars = (period, a, b, r, u1, u2)
+
+    def col(k):
+        """Per-chain parameters with ``k`` trailing axes.
+
+        How many they need is a property of the *rule*, not of the caller:
+        each exposure rule appends a node axis to the times, so (n, 1) is
+        right for the instantaneous path and (n, 1, 1) for the other two.
+        This is invisible at n = 1, where (1, 1) broadcasts against
+        anything -- which is exactly how it shipped wrong.
+        """
+        return [mx.reshape(p, (-1,) + (1,) * k) for p in pars]
+
+    def inst(tt, k):
+        per, av, bv, rv, u1v, u2v = col(k)
+        return flux_dev_analytic(separation_circular(tt, per, bv, av),
+                                 rv, u1v, u2v)
 
     if mode == _INT_NONE or exp_time == 0.0:
-        return inst(tau)
+        return inst(tau, 1)
     half = 0.5 * exp_time
     if mode == _INT_SUPER:
         off = (np.linspace(-half, half, int(n_sub)) if n_sub > 1
                else np.zeros(1))
         nodes = tau[..., None] + mx.array(off, dtype=tau.dtype)
-        return mx.mean(inst(nodes), axis=-1)
+        return mx.mean(inst(nodes, 2), axis=-1)
     # contact: exposure_nodes owns the branchless five-interval split.
     # tau is measured from each point's own mid-transit, so t0 = 0.
     #
@@ -1085,10 +1101,11 @@ def _tau_graph(tau, period, a, b, r, u1, u2, exp_time, mode, n_gl, n_sub):
     # interior, so moving it adds +f(c) dc and -f(c) dc -- but they are not
     # the same function, and turin certifies in fp64 what it runs in fp32.
     # The period keeps its gradient where it belongs: in the phase.
-    cs = tuple(mx.stop_gradient(c) for c in contact_offsets(r, a, b))
-    T, W = exposure_nodes(tau, tau * 0.0, mx.stop_gradient(period),
+    per1, a1, b1, r1 = col(1)[:4]
+    cs = tuple(mx.stop_gradient(c) for c in contact_offsets(r1, a1, b1))
+    T, W = exposure_nodes(tau, tau * 0.0, mx.stop_gradient(per1),
                           exp_time, cs, int(n_gl), dtype=tau.dtype)
-    return mx.sum(inst(T) * W, axis=-1)
+    return mx.sum(inst(T, 2) * W, axis=-1)
 
 
 def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1, u2, *,
@@ -1186,10 +1203,9 @@ def _flux_dev_from_tau_impl(tau, period, a, b, r, u1, u2, exp_time, mode,
             and metal_available()):
         out = _make_tau_core(exp_time, mode, n_gl, n_sub)(tau2d, *pc)
     else:
-        # the graph path broadcasts over points, so per-chain parameters
-        # have to carry the trailing axis the kernel gets for free
-        pg = [mx.reshape(p, (n, 1)) for p in pc]
-        out = _tau_graph(tau2d, *pg, exp_time, mode, n_gl, n_sub)
+        # the graph path takes the same (n,) parameters as the kernel and
+        # adds the trailing axes its own node grid needs
+        out = _tau_graph(tau2d, *pc, exp_time, mode, n_gl, n_sub)
     return out[0] if squeeze and n == 1 else out
 
 

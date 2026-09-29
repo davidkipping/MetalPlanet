@@ -270,6 +270,123 @@ def test_no_nan_gradients_on_boundary_sweep():
 
 
 # ---------------------------------------------------------------------------
+# The graph path with more than one chain
+#
+# Reported by turin: the fp64 graph path could not broadcast per-chain
+# parameters for n_chains > 1, in any spelling including scalars. The
+# exposure rules append a node axis to the times, and the parameters were
+# shaped (n, 1) regardless -- which broadcasts against anything when
+# n == 1 and against nothing when it is not. Every fp64 test here used a
+# 1-D tau, so n was always 1. These run the graph at n > 1 on purpose.
+# ---------------------------------------------------------------------------
+
+def _distinct_chains(n):
+    """Per-chain parameters that are actually different from each other,
+    so a test that mixes up chains cannot pass by symmetry."""
+    return dict(per=np.linspace(3.0, 4.2, n), a=np.linspace(7.5, 11.0, n),
+                b=np.linspace(0.0, 0.85, n), r=np.linspace(0.05, 0.22, n),
+                u1=np.linspace(0.20, 0.55, n), u2=np.linspace(0.10, 0.35, n))
+
+
+@pytest.mark.parametrize("n", [1, 2, 4, 33])
+@pytest.mark.parametrize("dtype", [mx.float64, mx.float32],
+                         ids=["fp64", "fp32"])
+@pytest.mark.parametrize("spelling", ["scalar", "per_chain"])
+@pytest.mark.parametrize("integ,kw", MODES, ids=[m[0] for m in MODES])
+def test_graph_path_batched_chains(n, dtype, spelling, integ, kw):
+    """Graph path (CPU stream forces it even in fp32) at n chains."""
+    m = 64
+    tau = np.broadcast_to(np.linspace(-0.1, 0.1, m), (n, m)).copy()
+    vals = (P, NOM["a"], NOM["b"], NOM["r"], NOM["u1"], NOM["u2"])
+    with mx.stream(mx.cpu):
+        pa = [mx.array(v if spelling == "scalar" else np.full(n, v),
+                       dtype=dtype) for v in vals]
+        out = flux_dev_from_tau(mx.array(tau, dtype=dtype), *pa,
+                                **dict(kw, integration=integ))
+        mx.eval(out)
+    got = np.asarray(out, dtype=np.float64)
+    assert got.shape == (n, m)
+    assert np.isfinite(got).all()
+    assert np.abs(got - got[0]).max() == 0.0     # identical chains
+
+
+@pytest.mark.parametrize("dtype", [mx.float64, mx.float32],
+                         ids=["fp64", "fp32"])
+@pytest.mark.parametrize("integ,kw", MODES, ids=[m[0] for m in MODES])
+def test_graph_path_uses_each_chains_own_parameters(dtype, integ, kw):
+    """Shapes that broadcast are not automatically shapes that broadcast
+    *correctly*: row j must be what chain j's parameters produce alone."""
+    n, m = 6, 128
+    p = _distinct_chains(n)
+    tau = np.stack([np.linspace(-0.12, 0.12, m) + 1e-3 * j
+                    for j in range(n)])
+
+    def run(sel):
+        with mx.stream(mx.cpu):
+            t = mx.array(np.atleast_2d(tau[sel]), dtype=dtype)
+            pa = [mx.array(np.atleast_1d(p[k][sel]), dtype=dtype)
+                  for k in ("per", "a", "b", "r", "u1", "u2")]
+            o = flux_dev_from_tau(t, *pa, **dict(kw, integration=integ))
+            mx.eval(o)
+        return np.asarray(o, dtype=np.float64)
+
+    batch = run(slice(None))
+    tol = 1e-15 if dtype == mx.float64 else 5e-7
+    for j in range(n):
+        assert np.abs(batch[j] - run(slice(j, j + 1))[0]).max() < tol, j
+    # and the chains really do differ, so the check above has teeth
+    assert min(np.abs(batch[i] - batch[j]).max()
+               for i in range(n) for j in range(i + 1, n)) > 1e-4
+
+
+@needs_metal
+@pytest.mark.parametrize("integ,kw", MODES, ids=[m[0] for m in MODES])
+def test_kernel_and_graph_agree_on_distinct_chains(integ, kw):
+    n, m = 6, 128
+    p = _distinct_chains(n)
+    tau = np.stack([np.linspace(-0.12, 0.12, m) + 1e-3 * j
+                    for j in range(n)])
+    keys = ("per", "a", "b", "r", "u1", "u2")
+    kw = dict(kw, integration=integ)
+    k32 = flux_dev_from_tau(mx.array(tau, dtype=mx.float32),
+                            *[mx.array(p[j], dtype=mx.float32) for j in keys],
+                            **kw)
+    with mx.stream(mx.cpu):
+        g64 = flux_dev_from_tau(
+            mx.array(tau, dtype=mx.float64),
+            *[mx.array(p[j], dtype=mx.float64) for j in keys], **kw)
+        mx.eval(g64)
+    mx.eval(k32)
+    assert np.abs(np.asarray(k32, np.float64)
+                  - np.asarray(g64, np.float64)).max() <= 5e-7
+
+
+@pytest.mark.parametrize("integ,kw", MODES, ids=[m[0] for m in MODES])
+def test_graph_path_gradients_at_many_chains(integ, kw):
+    """fp64 is turin's reference path, so its gradients have to survive
+    batching too -- not just its forward."""
+    n, m = 5, 96
+    p = _distinct_chains(n)
+    keys = ("per", "a", "b", "r", "u1", "u2")
+    tau = np.stack([np.linspace(-0.12, 0.12, m) for _ in range(n)])
+    with mx.stream(mx.cpu):
+        def f(t, *pv):
+            return mx.sum(flux_dev_from_tau(t, *pv,
+                                            **dict(kw, integration=integ)))
+
+        g = mx.grad(f, argnums=tuple(range(7)))(
+            mx.array(tau, dtype=mx.float64),
+            *[mx.array(p[j], dtype=mx.float64) for j in keys])
+        mx.eval(g)
+    assert np.asarray(g[0]).shape == (n, m)
+    for k in range(1, 7):
+        assert np.asarray(g[k]).shape == (n,)
+    assert all(np.isfinite(np.asarray(x)).all() for x in g)
+    # every chain must carry its own gradient, not a shared one
+    assert np.abs(np.diff(np.asarray(g[4]))).max() > 0.0
+
+
+# ---------------------------------------------------------------------------
 # Contract: shapes, dispatch, argument validation
 # ---------------------------------------------------------------------------
 
