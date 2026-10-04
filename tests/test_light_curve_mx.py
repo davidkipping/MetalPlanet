@@ -127,13 +127,17 @@ def test_gradients_secondary_eclipse():
 
 
 @pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
-@pytest.mark.parametrize("mode", ["plain", "contact"])
+@pytest.mark.parametrize("mode", ["plain", "contact", "supersample"])
 @pytest.mark.parametrize("ecc", [0.3, 0.0], ids=["e0.3", "e0"])
-def test_fp32_gradients_match_fp64(mode, ecc):
-    """fp32 on the GPU against the fp64 model, relative to each gradient's
-    condition scale: the sum of |ct * dF/dtheta| over points."""
+@pytest.mark.parametrize("ecc_as", ["array", "python"])
+def test_fp32_gradients_match_fp64(mode, ecc, ecc_as):
+    """fp32 on the GPU against the fp64 model, every route: an array ecc
+    takes the (e, w) graph; a Python ecc keeps light_curve's graphs --
+    the fused kernel in plain mode, which is differentiated here through
+    its custom VJP, and the contact / supersample graphs otherwise."""
     ct = np.random.default_rng(3).normal(size=T.size)
-    names = fields(params(ecc=ecc))
+    names = [k for k in fields(params(ecc=ecc))
+             if not (ecc_as == "python" and k == "ecc")]
     base = [get(params(ecc=ecc), k) for k in names]
 
     def grads(dtype):
@@ -147,7 +151,10 @@ def test_fp32_gradients_match_fp64(mode, ecc):
                 q = params(ecc=ecc)
                 for k, x in zip(names, v):
                     put(q, k, x)
-                return mx.sum(c * m.light_curve_mx(q))
+                f = m.light_curve_mx(q)
+                if mode == "supersample":
+                    f = mx.mean(mx.reshape(f, (T.size, -1)), axis=1)
+                return mx.sum(c * f)
 
             # each model differentiated in its own dtype: under mx.grad,
             # MLX needs the CPU stream for ANY float64 input (t0 = 0 here,
@@ -161,6 +168,45 @@ def test_fp32_gradients_match_fp64(mode, ecc):
     for k, a, b in zip(names, g32, g64):
         assert math.isfinite(a), k
         assert abs(a - b) <= 2e-3 * max(abs(b), 1e-3 * max(map(abs, g64))), k
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+@pytest.mark.parametrize("ecc", [0.0, 0.3], ids=["circular", "e0.3"])
+def test_fp32_python_ecc_runs_the_fused_kernel_and_is_bitwise(ecc):
+    """With a Python ecc the differentiable call is light_curve's graph
+    -- kernel included, which the cache key records -- and the output is
+    light_curve's bit for bit, whichever other fields are arrays."""
+    m = metalplanet.TransitModel(params(ecc=ecc), T, dtype=mx.float32)
+    assert m._kernel_usable()
+    q = params(ecc=ecc, rp=mx.array(0.1), w=mx.array(63.0),
+               a=mx.array(8.8), inc=mx.array(87.0))
+    got = np.asarray(m.light_curve_mx(q), dtype=np.float64)
+    assert (ecc == 0.0, True) in m._compiled and "ew" not in m._compiled
+    # a, inc, w as arrays go in-graph in fp32 (1-ulp from the host fold);
+    # with those three Python, the fold is light_curve's and bitwise
+    assert np.abs(got - m.light_curve(params(ecc=ecc))).max() < 1e-6
+    q = params(ecc=ecc, rp=mx.array(0.1), per=mx.array(3.45))
+    got = np.asarray(m.light_curve_mx(q), dtype=np.float64)
+    assert np.array_equal(got, m.light_curve(params(ecc=ecc)))
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+def test_a_cpu_stream_call_does_not_poison_the_gpu_cache():
+    """0.9.1 regression: the compiled-graph cache was keyed on circular
+    only, and the kernel decision is made at build time from the active
+    stream. The README recipe (an fp64 t0 gradient under the CPU stream)
+    as a model's FIRST call then cached a kernel-less graph that every
+    later GPU light_curve reused (3.4 ms vs 1.4 ms at 2e6 points)."""
+    m = metalplanet.TransitModel(params(), T, dtype=mx.float32)
+    with mx.stream(mx.cpu):
+        g = mx.grad(lambda x: mx.sum(m.light_curve_mx(params(t0=x))))(
+            mx.array(0.0, dtype=mx.float64))
+        mx.eval(g)
+    assert (False, False) in m._compiled          # built without the kernel
+    got = m.light_curve(params())
+    assert (False, True) in m._compiled           # and now WITH it
+    fresh = metalplanet.TransitModel(params(), T, dtype=mx.float32)
+    assert np.array_equal(got, fresh.light_curve(params()))
 
 
 # ---------------------------------------------------------------------------
@@ -241,41 +287,52 @@ def test_callers_compile_and_grad():
 
 
 @pytest.mark.parametrize("bad", [-0.1, 1.0, 1.2])
-def test_python_eccentricity_out_of_range_raises(bad):
-    """Both entry points (light_curve used to return a flat curve for
-    e >= 1; light_curves always raised)."""
+def test_eccentricity_out_of_range_raises_when_readable(bad):
+    """Python ecc on both entry points (light_curve used to return a flat
+    curve for e >= 1; light_curves always raised), and an array ecc
+    wherever its value can be read: eagerly, and under mx.grad."""
     m = metalplanet.TransitModel(params(), T)
     for f in (m.light_curve, m.light_curve_mx):
         with pytest.raises(ValueError, match="eccentricity"):
             f(params(ecc=bad))
-    with pytest.raises(ValueError, match="eccentricity"):     # array route
-        m.light_curve_mx(params(ecc=bad, rp=mx.array(0.1, dtype=mx.float64)))
+    with mx.stream(mx.cpu):
+        f64 = lambda v: mx.array(v, dtype=mx.float64)
+        with pytest.raises(ValueError, match="eccentricity"):
+            m.light_curve_mx(params(ecc=bad, rp=f64(0.1)))
+        with pytest.raises(ValueError, match="eccentricity"):
+            m.light_curve_mx(params(ecc=f64(bad)))
+        with pytest.raises(ValueError, match="eccentricity"):
+            mx.grad(lambda e: mx.sum(m.light_curve_mx(params(ecc=e))))(
+                f64(bad))
 
 
-def test_array_eccentricity_out_of_range_is_nan_everywhere():
-    """An array-valued e may be traced, so it cannot raise: out of range
-    it returns NaN -- directly, under vmap, and under a caller's compile
-    -- never a plausible curve (e = 1.5 used to give a flat one)."""
+def test_traced_eccentricity_out_of_range_is_nan_in_value_and_gradient():
+    """Under vmap or a caller's compile the value cannot be read, so it
+    cannot raise: out of range, the output AND every gradient are NaN --
+    never a plausible curve (e = 1.5 used to give a flat one) and never
+    a zero gradient beside a NaN loss (0.9.1 masked it to zero)."""
     m = metalplanet.TransitModel(params(), T)
     with mx.stream(mx.cpu):
         f64 = lambda v: mx.array(v, dtype=mx.float64)
-        for bad in (-0.1, 1.0, 1.5):
-            assert np.isnan(np.asarray(
-                m.light_curve_mx(params(ecc=f64(bad))))).all()
         rows = mx.vmap(lambda e: m.light_curve_mx(params(ecc=e)))(
             f64([0.1, 1.5, -0.1]))
         comp = mx.compile(lambda e: m.light_curve_mx(params(ecc=e)))(
             f64(-0.1))
         mx.eval(rows, comp)
-        good = m.light_curve(params(ecc=0.1))
         rows = np.asarray(rows)
-        assert np.abs(rows[0] - good).max() < 1e-14
+        assert np.abs(rows[0] - m.light_curve(params(ecc=0.1))).max() < 1e-14
         assert np.isnan(rows[1:]).all() and np.isnan(np.asarray(comp)).all()
-        # and a valid point's gradient is clean beside an invalid one
-        g = mx.grad(lambda e: mx.sum(mx.vmap(lambda x: m.light_curve_mx(
-            params(ecc=x)))(e)[0]))(f64([0.1, 1.5]))
-        mx.eval(g)
-    assert np.isfinite(np.asarray(g)[0])
+        # gradients of a loss over ALL rows: the invalid row's is NaN, the
+        # valid row's is still finite and right
+        loss = lambda e: mx.sum(mx.vmap(
+            lambda x: m.light_curve_mx(params(ecc=x)))(e))
+        g = np.asarray(mx.grad(loss)(f64([0.1, 1.5])))
+        g_ok = np.asarray(mx.grad(loss)(f64([0.1, 0.2])))
+        gc = mx.compile(mx.grad(lambda e: mx.sum(m.light_curve_mx(
+            params(ecc=e)))))(f64(1.5))
+        mx.eval(gc)
+    assert np.isnan(g[1]) and np.isnan(float(gc))
+    assert np.isfinite(g[0]) and g[0] == g_ok[0]
 
 
 @pytest.mark.parametrize("law,u", [("quadratic", [0.4, 0.25]),
@@ -318,18 +375,7 @@ def test_fixed_eccentricity_keeps_light_curves_graph(ecc, key, mode):
     and its gradients are right there too."""
     m = metalplanet.TransitModel(params(ecc=ecc), T, **MODES[mode])
     check_gradients(m, dict(ecc=ecc), tol=2e-5, fixed=("ecc",))
-    assert set(m._compiled) <= {True, False} and key in m._compiled
-
-
-@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
-@pytest.mark.parametrize("ecc", [0.0, 0.3], ids=["circular", "e0.3"])
-def test_fp32_fixed_eccentricity_uses_the_fused_kernel(ecc):
-    m = metalplanet.TransitModel(params(ecc=ecc), T, dtype=mx.float32)
-    assert m._kernel_usable()
-    q = params(ecc=ecc, rp=mx.array(0.1), w=mx.array(63.0))
-    got = np.asarray(m.light_curve_mx(q), dtype=np.float64)
-    assert "ew" not in m._compiled
-    assert np.abs(got - m.light_curve(params(ecc=ecc))).max() < 1e-6
+    assert "ew" not in m._compiled and (key, False) in m._compiled
 
 
 def test_works_on_the_default_stream():

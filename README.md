@@ -148,8 +148,10 @@ with mx.stream(mx.cpu):
   differentiating the other fields costs nothing extra. Only an
   array-valued `ecc` takes the (e, w) graph, measured 3-4x slower on an
   fp32 GPU model at 2e6 points.
-- An array-valued `ecc` outside [0, 1) returns NaN, since it may be
-  traced. A Python one raises `ValueError`.
+- An `ecc` outside [0, 1) raises `ValueError` whenever its value can be
+  read (a Python number; an array, eagerly or under `mx.grad`). Under
+  `mx.vmap` or your own `mx.compile` it is traced and cannot raise:
+  there the output and every gradient are NaN.
 - Under `mx.grad`, MLX needs the CPU stream for any float64 input. With
   an fp32 GPU model, differentiate float32 fields there; for an absolute
   t0 (which must be fp64), take the gradient under `mx.stream(mx.cpu)`.

@@ -107,22 +107,6 @@ def _ld_coeffs(params, conv=float) -> tuple[float, float]:
         "outside the ALFM19 formulation.")
 
 
-_ARRAY_FIELDS = ("t0", "per", "rp", "a", "inc", "ecc", "w", "fp")
-
-
-def _has_arrays(params) -> bool:
-    """Does any field (or limb-darkening coefficient) hold an mx.array?"""
-    if any(isinstance(getattr(params, k, None), mx.array)
-           for k in _ARRAY_FIELDS):
-        return True
-    u = params.u
-    if u is None:                     # not `params.u or []`: u may be an array
-        return False
-    if isinstance(u, mx.array):
-        return True
-    return any(isinstance(x, mx.array) for x in list(u))
-
-
 class _nullcontext:
     def __enter__(self):
         return None
@@ -131,17 +115,22 @@ class _nullcontext:
         return False
 
 
+_ECC_MSG = "eccentricity must be in [0, 1); got {}"
+
+
 def _check_ecc(ecc):
-    """Reject eccentricities the model cannot represent. The single-set
-    path gets this for free from math.sqrt raising on a negative; the
-    batched path would instead hand np.sqrt a negative, emit a warning
-    and return an all-NaN row that a sampler turns into -inf with nothing
-    pointing at the parameter."""
+    """Reject eccentricities the model cannot represent, before they reach
+    a graph that would return a plausible flat curve (e >= 1) or an
+    all-NaN row (e < 0) with nothing pointing at the parameter. A Python
+    number is checked as a scalar; the batched path passes an array."""
+    if not isinstance(ecc, np.ndarray):
+        if not 0.0 <= ecc < 1.0:
+            raise ValueError(_ECC_MSG.format(ecc))
+        return
     bad = ~((ecc >= 0.0) & (ecc < 1.0))
     if bool(np.any(bad)):
-        raise ValueError(
-            f"eccentricity must be in [0, 1); got "
-            f"{np.asarray(ecc)[bad][:4]} (and possibly more)")
+        raise ValueError(_ECC_MSG.format(
+            f"{ecc[bad][:4]} (and possibly more)"))
 
 
 def _ld_coeffs_batch(law, u):
@@ -260,13 +249,6 @@ class TransitModel:
         # visible fraction of the (uniform) planet disk
         return 1.0 + fp * (1.0 + s0d / (math.pi * rp * rp))
 
-    def _uvec(self, params):
-        """Traced coefficient vector for the polynomial law (else None)."""
-        if not self._n_poly:
-            return None
-        return mx.array(np.asarray(list(params.u), dtype=np.float64),
-                        dtype=self.dtype)
-
     def _kernel_usable(self) -> bool:
         """The fused kernel serves the fp32 GPU *primary*-transit path for
         both circular and eccentric orbits; fp64, CPU streams, secondary
@@ -285,7 +267,11 @@ class TransitModel:
         graphs, (e, w [rad]) inputs in place of (k, h) -- light_curve_mx's
         differentiable route, exact at e = 0 (anchored.anchor_constants_ew).
         With ew=False every graph is exactly what it always was."""
-        key = "ew" if ew else circular
+        # The kernel decision depends on the *active* stream, so it is part
+        # of the key: a graph first built under the CPU stream (an fp64
+        # gradient, say) must not be the one every later GPU call reuses.
+        kern = self._kernel_usable()
+        key = "ew" if ew else (circular, kern)
         fn = self._compiled.get(key)
         if fn is not None:
             return fn
@@ -355,7 +341,7 @@ class TransitModel:
                 z, front = separation_anchored(phi, k, h, a, ci,
                                                **consts(k, h))
                 return self._photom(z, front, rp, None, None, fp, uvec=uv)
-        elif circular and self._kernel_usable():
+        elif circular and kern:
             # Circular orbit on the SAME fused kernel as the eccentric one:
             # k = h = 0 and cos i = b / a. Exact (the anchored orbit
             # degenerates to the circular one) and the kernel skips the
@@ -382,7 +368,7 @@ class TransitModel:
                 z = mx.sqrt(mx.maximum((a * sphi) ** 2 + (b * cphi) ** 2,
                                        1e-24))
                 return self._photom(z, cphi > 0.0, rp, u1, u2, fp)
-        elif self._kernel_usable() and not ew:
+        elif kern and not ew:
             # Whole eccentric model in one kernel. (Not on the (e, w) route:
             # the kernel skips its seven eccentric-only gradient slots on
             # e == 0 chains, which is exact for (k, h) -- whose Jacobian
@@ -426,31 +412,106 @@ class TransitModel:
         self._compiled[key] = fn
         return fn
 
-    def _eval_compiled(self, params) -> mx.array:
-        u1, u2 = _ld_coeffs(params)
-        fp = 0.0 if params.fp is None else float(params.fp)
-        ecc = float(params.ecc)
-        # math.sqrt below rejects e < 0 by itself, but e >= 1 used to sail
-        # through to a silently flat curve; light_curves already checks
-        _check_ecc(np.array(ecc))
-        inc = math.radians(float(params.inc))
+    def _model_eval(self, params) -> mx.array:
+        """One parameter set -> flux, through the compiled graphs. The one
+        path behind light_curve and light_curve_mx.
 
-        def s(x):
-            return mx.array(float(x), dtype=self.dtype)
+        A field holding an mx.array stays in the graph (gradients flow); a
+        Python number is folded on the host in fp64 and cast once, so with
+        all-Python fields the arguments -- b = a cos i, (k, h) =
+        sqrt(e) (cos w, sin w) -- are formed exactly as they always were.
 
-        ld = ((self._uvec(params),) if self._n_poly
-              else (s(u1), s(u2)))
-        t0 = params.t0 - self._t_ref
-        if ecc == 0.0:
-            a = float(params.a)
-            return self._get_compiled(True)(
-                s(t0), s(params.per), s(a), s(a * math.cos(inc)),
-                s(params.rp), *ld, s(fp))
-        w = math.radians(float(params.w))
-        return self._get_compiled(False)(
-            s(t0), s(params.per), s(params.a),
-            s(math.sqrt(ecc) * math.cos(w)), s(math.sqrt(ecc) * math.sin(w)),
-            s(math.cos(inc)), s(params.rp), *ld, s(fp))
+        Routing follows ``ecc``: a Python 0 takes the circular graph, a
+        Python e > 0 the (k, h) graph (smooth in w for fixed e), an
+        mx.array the (e, w) graph, which alone is exact in d/de at e = 0
+        (anchored.anchor_constants_ew) and never uses the fused kernel.
+        """
+        dt = self.dtype
+
+        def is_arr(x):
+            return isinstance(x, mx.array)
+
+        def cast(x):
+            if is_arr(x):
+                if x.dtype == dt:
+                    return x
+                with mx.stream(mx.cpu):   # an fp64 value may not touch Metal
+                    return x.astype(dt)
+            return mx.array(float(x), dtype=dt)
+
+        def rad(x):                       # degrees -> radians, in-graph
+            return cast(x) * (math.pi / 180.0)
+
+        t0 = params.t0
+        if is_arr(t0):
+            # the reference-time subtraction in fp64, then the model dtype
+            with mx.stream(mx.cpu):
+                t0_off = (t0.astype(mx.float64) - self._t_ref).astype(dt)
+        else:
+            t0_off = cast(t0 - self._t_ref)
+
+        inc = params.inc
+        if is_arr(inc):
+            ci = sincos(rad(inc))[1]      # fp64-accurate (MLX's cos is not)
+        else:
+            ci_py = math.cos(math.radians(float(inc)))
+            ci = cast(ci_py)
+        fp = cast(0.0 if params.fp is None else params.fp)
+        per, a, rp = cast(params.per), cast(params.a), cast(params.rp)
+
+        u = params.u
+        if self._n_poly:
+            if is_arr(u):
+                uv = cast(u)
+            elif any(is_arr(x) for x in list(u)):
+                uv = mx.stack([cast(x) for x in list(u)])
+            else:
+                uv = mx.array(np.asarray(list(u), dtype=np.float64),
+                              dtype=dt)
+            ld = (uv,)
+        else:
+            ld = _ld_coeffs(params, conv=cast)
+
+        ecc = params.ecc
+        ev = None
+        if is_arr(ecc):
+            # Concrete (eager, or under mx.grad -- its inputs are plain
+            # arrays) reads as a float and is validated like a number; the
+            # read is free when ecc is a leaf and otherwise evaluates its
+            # upstream graph. Under mx.compile / mx.vmap it is traced and
+            # cannot be read: then an out-of-range e makes the output NaN
+            # -- and, through the factor, every gradient -- loud where a
+            # ValueError cannot be raised.
+            try:
+                ev = float(ecc)
+            except ValueError:
+                pass
+        else:
+            ev = float(ecc)
+        if ev is not None:
+            _check_ecc(ev)
+
+        if is_arr(ecc):
+            e = cast(ecc)
+            f = self._get_compiled(False, ew=True)(
+                t0_off, per, a, e, rad(params.w), ci, rp, *ld, fp)
+            if ev is None:
+                ok = mx.logical_and(e >= 0.0, e < 1.0)
+                f = f * mx.where(ok, 1.0, float("nan")).astype(dt)
+            return f
+        if ev == 0.0:                     # circular: w is irrelevant
+            b = (a * ci if is_arr(params.a) or is_arr(inc)
+                 else cast(float(params.a) * ci_py))
+            return self._get_compiled(True)(t0_off, per, a, b, rp, *ld, fp)
+        sq = math.sqrt(ev)
+        if is_arr(params.w):
+            sw, cw = sincos(rad(params.w))
+            k, h = sq * cw, sq * sw
+        else:
+            w = math.radians(float(params.w))
+            k, h = cast(sq * math.cos(w)), cast(sq * math.sin(w))
+        return self._get_compiled(False)(t0_off, per, a, k, h, ci, rp,
+                                         *ld, fp)
 
     # -- batman-compatible surface ----------------------------------------
 
@@ -475,10 +536,10 @@ class TransitModel:
         self._check_law(params)
         if self._stream is not None:
             with mx.stream(self._stream):
-                f = self._eval_compiled(params)
+                f = self._model_eval(params)
                 out = np.array(f, dtype=np.float64)
         else:
-            out = np.array(self._eval_compiled(params), dtype=np.float64)
+            out = np.array(self._model_eval(params), dtype=np.float64)
         if (self.supersample_factor > 1
                 and self.integration == "supersample"):
             out = out.reshape(self.t.size,
@@ -626,10 +687,11 @@ class TransitModel:
         on in MLX -- differentiable in the parameters.
 
         Any ``TransitParams`` field may be an ``mx.array`` scalar (t0, per,
-        rp, a, inc, ecc, w, fp, and the entries of ``u``), and gradients
-        flow to every such field. Python numbers stay constants. The model
-        graphs are the compiled ones ``light_curve`` runs, so with all-
-        Python parameters the result is ``light_curve``'s, bit for bit.
+        rp, a, inc, ecc, w, fp, and ``u`` or its entries), and gradients
+        flow to every such field. Python numbers stay constants, folded on
+        the host exactly as ``light_curve`` folds them, so the result is
+        ``light_curve``'s bit for bit -- whichever fields are arrays, as
+        long as ``ecc`` is not (see ``_model_eval``).
 
         Returns the flux at the times given at construction, exposure-
         averaged for ``integration="contact"``. With ``supersample_factor``
@@ -641,9 +703,10 @@ class TransitModel:
         * an array-valued ``ecc`` enters as (e, w) directly
           (``anchor_constants_ew``), so d/d(ecc) is finite and correct at
           e = 0 -- the one-sided derivative, since e >= 0 -- and d/dw is
-          exactly 0 there. Out of [0, 1) it returns NaN rather than raising
-          (it may be traced, under vmap or a caller's compile); a Python
-          ``ecc`` out of range raises ValueError.
+          exactly 0 there. Out of [0, 1) it raises ValueError whenever the
+          value can be read (eagerly, or under ``mx.grad``); when it is
+          traced -- under ``mx.vmap`` or a caller's ``mx.compile`` -- it
+          cannot raise, and instead the output and every gradient are NaN.
         * a Python ``ecc`` keeps ``light_curve``'s own graph -- circular at
           e = 0, (k, h) above it -- so a fit that differentiates, say, only
           rp and t0 runs exactly as fast as ``light_curve``, fused kernel
@@ -673,76 +736,5 @@ class TransitModel:
         ctx = (mx.stream(self._stream) if self._stream is not None
                else _nullcontext())
         with ctx:
-            if not _has_arrays(params):
-                return self._eval_compiled(params)
-            return self._eval_graph(params)
+            return self._model_eval(params)
 
-    def _eval_graph(self, params) -> mx.array:
-        """light_curve_mx with array-valued fields: every parameter enters
-        the (e, w) eccentric graph as an array, gradients intact."""
-        dt = self.dtype
-
-        def cast(x):
-            if isinstance(x, mx.array):
-                if x.dtype == dt:
-                    return x
-                with mx.stream(mx.cpu):   # an fp64 value may not touch Metal
-                    return x.astype(dt)
-            return mx.array(float(x), dtype=dt)
-
-        def deg(x):                       # degrees -> radians, in-graph
-            if isinstance(x, mx.array):
-                return cast(x) * (math.pi / 180.0)
-            return cast(math.radians(float(x)))
-
-        t0 = params.t0
-        if isinstance(t0, mx.array):
-            # the reference-time subtraction in fp64, then the model dtype
-            with mx.stream(mx.cpu):
-                t0_off = (t0.astype(mx.float64) - self._t_ref).astype(dt)
-        else:
-            t0_off = cast(float(t0) - self._t_ref)
-
-        ecc = params.ecc
-        if not isinstance(ecc, mx.array):
-            # a Python number is concrete: validate it outright
-            ev = float(ecc)
-            if not 0.0 <= ev < 1.0:
-                raise ValueError(f"eccentricity must be in [0, 1); got {ev}")
-
-        inc = params.inc
-        if isinstance(inc, mx.array):
-            ci = sincos(deg(inc))[1]      # fp64-accurate (MLX's cos is not)
-        else:
-            ci = cast(math.cos(math.radians(float(inc))))
-        fp = cast(0.0 if params.fp is None else params.fp)
-        if self._n_poly:
-            ld = (mx.stack([cast(x) for x in list(params.u)]),)
-        else:
-            ld = _ld_coeffs(params, conv=cast)
-        per, a, rp = cast(params.per), cast(params.a), cast(params.rp)
-
-        # Route on what is *not* being differentiated. Only an array-valued
-        # ecc needs the (e, w) graph; a fixed eccentricity keeps light_curve's
-        # own graphs -- and on an fp32 GPU model, the fused kernel.
-        if not isinstance(ecc, mx.array):
-            if ev == 0.0:                 # circular: w is irrelevant
-                return self._get_compiled(True)(t0_off, per, a, a * ci, rp,
-                                                *ld, fp)
-            # e > 0 fixed: (k, h) = sqrt(e) (cos w, sin w) is smooth in w
-            sw, cw = sincos(deg(params.w))
-            sq = math.sqrt(ev)
-            return self._get_compiled(False)(t0_off, per, a, sq * cw,
-                                             sq * sw, ci, rp, *ld, fp)
-        # Differentiating e: the (e, w) graph, exact at e = 0. Its range is
-        # checked IN the graph -- no float(), which would force an eval on
-        # every call and is impossible under vmap / a caller's compile. An
-        # out-of-range e returns NaN, loud where a ValueError cannot be
-        # raised; the graph itself sees a safe e, so no NaN leaks into the
-        # gradients of valid points.
-        e = cast(ecc)
-        ok = mx.logical_and(e >= 0.0, e < 1.0)
-        e_safe = mx.where(ok, e, mx.zeros_like(e))
-        f = self._get_compiled(False, ew=True)(
-            t0_off, per, a, e_safe, deg(params.w), ci, rp, *ld, fp)
-        return mx.where(ok, f, mx.array(float("nan"), dtype=dt))

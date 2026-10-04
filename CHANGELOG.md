@@ -5,6 +5,58 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-10-04
+
+Fixes from two code reviews of 0.9.1.
+
+### Fixed
+- **A CPU-stream call could permanently slow `light_curve` on an fp32
+  model (0.9.1 regression).** The compiled-graph cache was keyed on
+  `circular` alone, while the fused-kernel decision is made at build
+  time from the *active* stream. With 0.9.1's shared cache, the README's
+  own recipe (an fp64 t0 gradient through `light_curve_mx` under the CPU
+  stream) as a model's first call cached a kernel-less graph that every
+  later GPU `light_curve` reused: 3.4 ms instead of 1.4 ms at 2e6 points.
+  The kernel decision is now part of the cache key.
+- **An out-of-range array `ecc` gave NaN with a zero gradient.** 0.9.1
+  masked both the input and the output, so a fitter holding e as an
+  array saw a NaN loss and a zero gradient, with nothing pointing at the
+  parameter, and an eager call with a bad array `ecc` returned NaN where
+  0.9.0 raised. Now: wherever the value can be read (eagerly, or under
+  `mx.grad`, whose inputs are plain arrays) it is validated and raises
+  `ValueError`. Only when traced, under `mx.vmap` or a caller's
+  `mx.compile`, is raising impossible, and there the output and every
+  gradient are NaN, through a NaN factor rather than a mask. A valid
+  point's gradient beside an invalid one is unchanged, which the test
+  now checks over a loss summed across all rows.
+- **One array field changed the result on an fp32 model.** 0.9.1's
+  fixed-e routes formed (k, h) and b in-graph in the model dtype, while
+  `light_curve` forms them on the host in fp64 and casts once -- a 1-ulp
+  difference, so adding an array `rp` moved the output at 1e-7. Python
+  fields are now folded on the host exactly as `light_curve` folds them,
+  and the output is `light_curve`'s bit for bit whichever other fields
+  are arrays (only `ecc` as an array changes the route).
+
+### Changed
+- **One evaluation path.** `_eval_compiled`, `_eval_graph`, `_has_arrays`
+  and `_uvec` are replaced by a single `_model_eval` behind both
+  `light_curve` and `light_curve_mx`: a Python field is folded on the
+  host, an array field stays in the graph. The routing and the
+  eccentricity validation (`_check_ecc`, now scalar-aware, with one
+  message) live in one place. An `mx.array` vector `u` is cast whole
+  rather than sliced and restacked.
+
+### Tests
+- fp32 gradients through the fused kernel's custom VJP (Python `ecc`,
+  plain mode) and through the fp32 contact / supersample graphs, against
+  the fp64 model -- the routes 0.9.1 enabled but never differentiated.
+- The kernel route is asserted from the cache key, not inferred from the
+  absence of the (e, w) key; the cache-poisoning scenario is a regression
+  test. 9 new tests; 736 green.
+
+`light_curve`, `light_curves` and `flux_dev_from_tau` remain bitwise
+identical to 0.8.2 (296 arrays).
+
 ## [0.9.1] — 2026-10-04
 
 Fixes from a code review of 0.9.0.
