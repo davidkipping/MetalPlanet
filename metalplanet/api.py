@@ -274,16 +274,13 @@ class TransitModel:
         return 1.0 + fp * (1.0 + s0d / (math.pi * rp * rp))
 
     def _kernel_usable(self) -> bool:
-        """The fused kernel serves the fp32 GPU *primary*-transit path for
-        both circular and eccentric orbits; fp64, CPU streams, secondary
-        eclipses, polynomial limb darkening and the contact rule keep the
-        graph.
+        """Can the fused kernel run *here*: fp32, a usable Metal device,
+        the GPU stream active, and not switched off. Which model graphs
+        the kernel serves at all (primary transits, quadratic limb
+        darkening, no contact rule) is _get_compiled's business, decided
+        beside the branches it governs.
         """
-        if not self.use_metal or self.transittype != "primary":
-            return False
-        if self._n_poly:            # the kernel is quadratic-only
-            return False
-        if self.integration == "contact":   # its own node grid: graph-only
+        if not self.use_metal:
             return False
         if self.dtype != mx.float32:
             return False
@@ -301,8 +298,11 @@ class TransitModel:
         # gradient, say) must not be the one every later GPU call reuses.
         # It enters the key only where a kernel branch below is reachable,
         # so a graph the kernel never serves is compiled once, not once
-        # per stream. Keep this condition in step with the branches.
-        kernel_branch = not ew and not poly and self.integration != "contact"
+        # per stream. This is THE statement of what the kernel serves:
+        # primary transits with quadratic limb darkening, on the (k, h)
+        # or circular graph, without the contact rule.
+        kernel_branch = (not ew and not poly and self.transittype == "primary"
+                         and self.integration != "contact")
         kern = kernel_branch and self._kernel_usable()
         key = "ew" if ew else (circular, kern)
         fn = self._compiled.get(key)
@@ -462,54 +462,63 @@ class TransitModel:
         def is_arr(x):
             return isinstance(x, mx.array)
 
-        def cast(x, name, scalar=True):
+        # Shapes first, once, before any routing: every per-set field is
+        # one number, and u is a flat vector of them. A route that never
+        # reads a field (w on a circular orbit) still rejects a bad one.
+        for name in ("t0", "per", "rp", "a", "inc", "ecc", "w", "fp"):
+            x = getattr(params, name)
             if is_arr(x):
-                if scalar:
-                    _need_scalar(x, name)
+                _need_scalar(x, name)
+        u = params.u
+        if is_arr(u):
+            if u.ndim != 1:
+                raise ValueError(f"u must be a 1-D vector; got shape {u.shape}")
+        elif u is not None:
+            for x in list(u):
+                if is_arr(x):
+                    _need_scalar(x, "u")
+
+        def cast(x):
+            if is_arr(x):
                 if x.dtype == dt:
                     return x
                 with mx.stream(mx.cpu):   # an fp64 value may not touch Metal
                     return x.astype(dt)
             return mx.array(float(x), dtype=dt)
 
-        def rad(x, name):                 # degrees -> radians
+        def rad(x):                       # degrees -> radians
             if is_arr(x):
-                return cast(x, name) * (math.pi / 180.0)
-            return cast(math.radians(float(x)), name)   # on the host, fp64
+                return cast(x) * (math.pi / 180.0)
+            return cast(math.radians(float(x)))   # on the host, in fp64
 
         t0 = params.t0
         if is_arr(t0):
-            _need_scalar(t0, "t0")
             # the reference-time subtraction in fp64, then the model dtype
             with mx.stream(mx.cpu):
                 t0_off = (t0.astype(mx.float64) - self._t_ref).astype(dt)
         else:
-            t0_off = cast(t0 - self._t_ref, "t0")
+            t0_off = cast(t0 - self._t_ref)
 
         inc = params.inc
         if is_arr(inc):
-            ci = sincos(rad(inc, "inc"))[1]   # fp64-accurate (MLX's cos is not)
+            ci = sincos(rad(inc))[1]      # fp64-accurate (MLX's cos is not)
         else:
             ci_py = math.cos(math.radians(float(inc)))
-            ci = cast(ci_py, "inc")
-        fp = cast(0.0 if params.fp is None else params.fp, "fp")
-        per, a, rp = (cast(params.per, "per"), cast(params.a, "a"),
-                      cast(params.rp, "rp"))
-        if is_arr(params.w):              # unread on a circular orbit,
-            _need_scalar(params.w, "w")   # but a scalar all the same
+            ci = cast(ci_py)
+        fp = cast(0.0 if params.fp is None else params.fp)
+        per, a, rp = cast(params.per), cast(params.a), cast(params.rp)
 
-        u = params.u
         if self._n_poly:
             if is_arr(u):
-                uv = cast(u, "u", scalar=False)
+                uv = cast(u)
             elif any(is_arr(x) for x in list(u)):
-                uv = mx.stack([cast(x, "u") for x in list(u)])
+                uv = mx.stack([cast(x) for x in list(u)])
             else:
                 uv = mx.array(np.asarray(list(u), dtype=np.float64),
                               dtype=dt)
             ld = (uv,)
         else:
-            ld = _ld_coeffs(params, conv=lambda x: cast(x, "u"))
+            ld = _ld_coeffs(params, conv=cast)
 
         ecc = params.ecc
         if is_arr(ecc):
@@ -518,12 +527,12 @@ class TransitModel:
             # mx.grad) it raises like a number; traced (mx.compile,
             # mx.vmap) it cannot, and an out-of-range e instead makes the
             # output NaN -- and, through the factor, every gradient.
-            e = cast(ecc, "ecc")
+            e = cast(ecc)
             ev = _scalar_value(e)
             if ev is not None:
                 _check_ecc(ev)
             f = self._get_compiled(False, ew=True)(
-                t0_off, per, a, e, rad(params.w, "w"), ci, rp, *ld, fp)
+                t0_off, per, a, e, rad(params.w), ci, rp, *ld, fp)
             if ev is None:
                 ok = mx.logical_and(e >= 0.0, e < 1.0)
                 f = f * mx.where(ok, 1.0, float("nan")).astype(dt)
@@ -532,15 +541,15 @@ class TransitModel:
         _check_ecc(ev)
         if ev == 0.0:                     # circular: w is irrelevant
             b = (a * ci if is_arr(params.a) or is_arr(inc)
-                 else cast(float(params.a) * ci_py, "a"))
+                 else cast(float(params.a) * ci_py))
             return self._get_compiled(True)(t0_off, per, a, b, rp, *ld, fp)
         sq = math.sqrt(ev)
         if is_arr(params.w):
-            sw, cw = sincos(rad(params.w, "w"))
+            sw, cw = sincos(rad(params.w))
             k, h = sq * cw, sq * sw
         else:
             w = math.radians(float(params.w))
-            k, h = cast(sq * math.cos(w), "w"), cast(sq * math.sin(w), "w")
+            k, h = cast(sq * math.cos(w)), cast(sq * math.sin(w))
         return self._get_compiled(False)(t0_off, per, a, k, h, ci, rp,
                                          *ld, fp)
 
@@ -727,7 +736,8 @@ class TransitModel:
         ``w``, or ``a`` on a circular orbit, is combined in-graph in the
         model dtype (b = a cos i, (k, h) = sqrt(e) (cos w, sin w)), which
         on an fp32 model is within ~1 ulp of the host fold (see
-        ``_model_eval``). Every field must be a scalar.
+        ``_model_eval``). Every field must be a scalar and ``u`` a flat
+        vector; a wrong shape raises before anything is built.
 
         Returns the flux at the times given at construction, exposure-
         averaged for ``integration="contact"``. With ``supersample_factor``

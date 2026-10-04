@@ -187,14 +187,20 @@ class TestEccentricKernelRouting:
         assert np.abs(mk.light_curve(p) - ref).max() < 5e-6
 
     def test_fp64_and_secondary_do_not_use_the_kernel(self):
-        m64, _ = self._model(0.3, mx.float64, n=101)
+        """The kernel decision is recorded in the compiled-graph cache
+        key, (circular, kernel): fp64 cannot run it, and a secondary
+        eclipse is a graph the kernel does not serve."""
+        m64, p64 = self._model(0.3, mx.float64, n=101)
         assert not m64._kernel_usable()
+        m64.light_curve(p64)
+        assert list(m64._compiled) == [(False, False)]
         p, _ = _params(ecc=0.3, w=63.0)
         p.fp = 0.002
         msec = metalplanet.TransitModel(
             p, np.linspace(-0.35, 0.35, 101), transittype="secondary",
             dtype=mx.float32)
-        assert not msec._kernel_usable()
+        msec.light_curve(p)
+        assert list(msec._compiled) == [(False, False)]
 
     def test_use_metal_false_disables_it(self):
         p, _ = _params(ecc=0.3, w=63.0)

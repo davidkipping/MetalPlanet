@@ -5,6 +5,46 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.9.5] — 2026-10-04
+
+Fixes from a fifth code review (of 0.9.4).
+
+### Fixed
+- **A 2-D polynomial `u` ran a wrong-order model.** A whole-array `u` was
+  cast without a shape check (0.9.4's guard was per entry), so a (3, 1)
+  `u` passed `_check_law`'s count of three, took `flux_dev_poly`'s
+  batched branch and returned a (3, 601) curve of a one-coefficient
+  model, 8.8e-4 off, with no error. A whole-array `u` must now be a flat
+  vector.
+- **Shape validation is one pass, before any routing.** 0.9.4's notes
+  said "one chokepoint"; it was three sites (`cast`, a manual check for
+  t0, another for w), and `fp` and the whole-array `u` had none. All
+  nine fields and `u` are now checked in one loop at the top of
+  `_model_eval`, so a route that never reads a field still rejects a bad
+  one and the `w`-on-a-circular-orbit special case is gone.
+- **What the kernel serves is stated once.** `_kernel_usable()` now
+  answers only the device question (fp32, Metal, GPU stream, switched
+  on); which graphs the kernel serves (primary transits, quadratic limb
+  darkening, no contact rule) is decided in `_get_compiled`, beside the
+  branches it governs, and nowhere else. The three tests that pinned the
+  old answer pin the cache key instead.
+- A test docstring still claimed Python and array `w` give the identical
+  result, which 0.9.4 retracted; it now states the 1-ulp invariant its
+  body checks.
+
+### Not changed
+- `_scalar_value` treats any `ValueError` from reading a 0-d array as
+  "traced". The review notes an upstream evaluation failure under
+  `mx.grad` would then skip the range check and surface at the caller's
+  later `mx.eval` with a less specific traceback. That error still
+  surfaces; the previous message-matching guard (removed in 0.9.4 on the
+  prior review's advice) traded that traceback for a dependency on MLX's
+  exact wording. Left as is.
+
+The scalar-field test now runs on fp32 as well as fp64 and includes
+`fp`; 33 new tests; 799 green. `light_curve`, `light_curves` and
+`flux_dev_from_tau` remain bitwise identical to 0.8.2 (296 arrays).
+
 ## [0.9.4] — 2026-10-04
 
 Fixes from a fourth code review (of 0.9.3).

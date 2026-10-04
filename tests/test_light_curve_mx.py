@@ -186,20 +186,50 @@ def test_scalar_value_helper():
     assert seen["c"] is None and seen["v"] is None
 
 
+@pytest.mark.parametrize("dtype", [mx.float64, mx.float32],
+                         ids=["fp64", "fp32"])
 @pytest.mark.parametrize("field", ["t0", "per", "rp", "a", "inc", "ecc",
-                                   "w", "u0"])
+                                   "w", "fp", "u0"])
 @pytest.mark.parametrize("shape", [(601,), (1,), (1, 1)],
                          ids=["vector", "len1", "1x1"])
-def test_every_field_must_be_a_scalar(field, shape):
+def test_every_field_must_be_a_scalar(dtype, field, shape):
     """0.9.3 guarded ecc alone, by size: a (601,) rp ran -- one value per
-    time sample -- and a (1, 1) ecc changed the output's shape."""
+    time sample (and died in an opaque reshape on the fp32 kernel route)
+    -- and a (1, 1) ecc changed the output's shape. Checked up front, on
+    every route, before anything is built."""
+    if dtype == mx.float32 and not metal_available():
+        pytest.skip("Metal unavailable")
     for ecc in (0.0, 0.3):              # circular and eccentric routes
-        m = metalplanet.TransitModel(params(ecc=ecc), T)
+        m = metalplanet.TransitModel(params(ecc=ecc), T, dtype=dtype)
         q = params(ecc=ecc)
+        val = 1e-3 if field == "fp" else get(q, field)
         with mx.stream(mx.cpu):
-            put(q, field, mx.full(shape, get(q, field), dtype=mx.float64))
-            with pytest.raises(ValueError, match="must be a scalar"):
+            put(q, field, mx.full(shape, val, dtype=mx.float64))
+            with pytest.raises(ValueError, match=f"{field[:1]}.* must be a scalar"):
                 m.light_curve_mx(q)
+
+
+@pytest.mark.parametrize("law,u", [("quadratic", [0.4, 0.25]),
+                                   ("polynomial", [0.4, 0.25, 0.05]),
+                                   ("polynomial", [0.4])])
+def test_whole_array_u_must_be_a_flat_vector(law, u):
+    """A (3, 1) polynomial u passed _check_law (three entries) and 0.9.4's
+    per-entry check (cast whole, unchecked), then took flux_dev_poly's
+    batched branch: a (3, 601) output of a wrong-order model, 8.8e-4 off,
+    with no error. A (1, 1) one-coefficient u reshaped the output."""
+    m = metalplanet.TransitModel(params(limb_dark=law, u=u), T)
+    n = len(u)
+    with mx.stream(mx.cpu):
+        flat = mx.array(u, dtype=mx.float64)
+        ok = np.asarray(m.light_curve_mx(params(limb_dark=law, u=flat)))
+        assert ok.shape == (T.size,)
+        # (1, n) is caught first by _check_law, which counts one entry;
+        # (n, 1) passes that count and needs the shape check
+        for shape in ((n, 1), (1, n)):
+            with pytest.raises(ValueError,
+                               match="u must be a 1-D vector|order changed"):
+                m.light_curve_mx(params(limb_dark=law,
+                                        u=mx.reshape(flat, shape)))
 
 
 def test_vector_eccentricity_is_rejected():
@@ -226,7 +256,7 @@ def test_ew_route_is_as_accurate_as_the_kh_route_in_fp32():
     fp64) computed along different fp32 paths: each sits ~1.8e-7 from
     fp64 truth and they differ from each other by ~2.4e-7. That is path
     rounding, not a fold error -- a Python w (folded on the host) and an
-    array w (in-graph) give the identical (e, w) result."""
+    array w (in-graph) agree to 1 fp32 ulp (not bitwise: see below)."""
     m32 = metalplanet.TransitModel(params(), T, dtype=mx.float32)
     truth = metalplanet.TransitModel(params(), T).light_curve(params())
     kh = m32.light_curve(params())

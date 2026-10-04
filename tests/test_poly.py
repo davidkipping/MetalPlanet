@@ -214,7 +214,7 @@ class TestFrontend:
         m, p = self._model([0.3, 0.2, 0.1], ecc=0.3, w=63.0)
         f = m.light_curve(p)
         assert f.min() < 0.99 and np.isfinite(f).all()
-        assert not m._kernel_usable()   # kernel is quadratic-only
+        assert list(m._compiled) == [(False, False)]   # kernel is quadratic-only
 
     def test_empty_coefficients_rejected(self):
         with pytest.raises(ValueError, match="at least|>= 1|needs"):
