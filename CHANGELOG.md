@@ -5,6 +5,8 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-10-04
+
 ### Added
 - **`TransitModel.light_curve_mx` is differentiable in every
   `TransitParams` field.** Up to 0.8.2 it read each field through
