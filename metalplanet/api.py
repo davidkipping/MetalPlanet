@@ -649,7 +649,7 @@ class TransitModel:
 
     def light_curve_mx(self, params) -> mx.array:
         """Supersampled-grid flux as an MLX array (stays in the graph;
-        no averaging applied) — for building differentiable pipelines.
+        no averaging applied) — for building on in MLX.
 
         Note this is the *eager* path: unlike ``light_curve`` it does not
         go through the mx.compile'd graph or the fused kernels, because
@@ -663,5 +663,22 @@ class TransitModel:
         here, so the result matches ``light_curve`` one-for-one. With
         ``supersample_factor`` it is not: that mode returns the raw
         supersampled grid, as the summary line says.
+
+        Precision: the graph is built on the model's own stream, as
+        ``light_curve`` does -- for the default ``dtype=mx.float64`` that is
+        the CPU, because MLX has no float64 on Metal. The result is a lazy
+        fp64 array, so whatever you build on it must stay on the CPU too:
+        wrap your downstream ops in ``with mx.stream(mx.cpu):``.
+
+        Gradients: the ``TransitParams`` fields are read as Python floats,
+        so this is *not* differentiable in them -- a gradient taken through
+        it comes out zero, silently. For a model differentiable in its
+        parameters use ``flux_dev_from_tau`` or ``metalplanet.anvil``.
         """
+        if self._stream is not None:
+            # MLX has no float64 on Metal: build on the CPU, as light_curve
+            # does. Each op keeps its stream, so evaluating it later from
+            # any context works.
+            with mx.stream(self._stream):
+                return self._eval(params)
         return self._eval(params)

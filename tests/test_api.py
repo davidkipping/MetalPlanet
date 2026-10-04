@@ -113,6 +113,46 @@ class TestValidation:
             metalplanet.TransitModel(p, T, supersample_factor=5)
 
 
+class TestLightCurveMx:
+    """light_curve_mx used to build its graph on the default device, so a
+    default (fp64) TransitModel raised 'float64 is not supported on the
+    GPU' unless the caller had already switched to the CPU stream."""
+
+    @pytest.mark.parametrize("dtype", [None, mx.float32],
+                             ids=["default_fp64", "fp32"])
+    @pytest.mark.parametrize("kw", [{}, dict(exp_time=0.02,
+                                             integration="contact"),
+                                    dict(exp_time=0.02,
+                                         supersample_factor=5)],
+                             ids=["plain", "contact", "supersample"])
+    @pytest.mark.parametrize("ecc,w", [(0.0, 90.0), (0.3, 63.0)],
+                             ids=["circular", "eccentric"])
+    def test_works_on_the_default_stream(self, dtype, kw, ecc, w):
+        p, _ = _params(ecc=ecc, w=w)
+        m = metalplanet.TransitModel(p, T, dtype=dtype, **kw)
+        out = m.light_curve_mx(p)            # no stream context here
+        mx.eval(out)                         # nor here
+        assert out.dtype == m.dtype
+        got = np.asarray(out, dtype=np.float64)
+        if kw.get("supersample_factor", 1) > 1:   # raw grid: average it
+            got = got.reshape(T.size, -1).mean(axis=1)
+        tol = 1e-14 if m.dtype == mx.float64 else 5e-7
+        assert np.abs(got - m.light_curve(p)).max() < tol
+
+    def test_parameters_are_not_differentiable_and_the_docs_say_so(self):
+        """Pinned so a future fix to differentiability updates the docs:
+        today the fields are read as Python floats, the gradient is zero."""
+        p, _ = _params()
+        m = metalplanet.TransitModel(p, T, dtype=mx.float32)
+
+        def f(rp):
+            p.rp = rp
+            return mx.sum(m.light_curve_mx(p))
+
+        assert float(mx.grad(f)(mx.array(0.1))) == 0.0
+        assert "not* differentiable" in m.light_curve_mx.__doc__
+
+
 class TestDifferentiability:
     def test_light_curve_mx_gradient(self):
         """The frontend model stays differentiable via light_curve_mx."""

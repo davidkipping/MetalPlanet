@@ -5,6 +5,27 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-10-04
+
+### Fixed
+- **`TransitModel.light_curve_mx` failed on a default model.**
+  `TransitModel` defaults to `dtype=mx.float64`, and MLX has no float64 on
+  Metal. `light_curve` and `light_curves` build on the model's CPU stream;
+  `light_curve_mx` built on the default (GPU) device and raised
+  `float64 is not supported on the GPU` unless the caller had already
+  switched streams. It now builds on the model's stream too. The result
+  is a lazy fp64 array, so the caller's own downstream ops still have to
+  run on `mx.cpu`; the docstring now says so. 12 tests cover the default
+  fp64 and fp32 models, circular and eccentric, plain, contact and
+  supersampled, with no stream context.
+- **`light_curve_mx`'s docstring claimed differentiability it does not
+  have.** It reads the `TransitParams` fields as Python floats, so a
+  gradient taken through it in a parameter is silently **zero**. The
+  docstring now says so and points to `flux_dev_from_tau` and
+  `metalplanet.anvil`, and a test pins the behaviour so that a future fix
+  must update the docs. (`TestDifferentiability.test_light_curve_mx_gradient`
+  never exercised it: it differentiates a hand-built graph instead.)
+
 ## [0.8.1] — 2026-10-04
 
 ### Fixed
