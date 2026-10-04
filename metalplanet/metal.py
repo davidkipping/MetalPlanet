@@ -624,23 +624,6 @@ def _phot_header() -> str:
 # Integration modes, shared with the Python wrapper.
 _INT_NONE, _INT_CONTACT, _INT_SUPER = 0, 1, 2
 
-# Shared preamble: indices, per-chain parameters, and the exposure window.
-_TAU_HEAD = """
-    uint x = thread_position_in_grid.x;
-    uint y = thread_position_in_grid.y;
-    if (x >= (uint)npts) return;
-    uint i = y * (uint)npts + x;
-
-    float tau0 = taui[i];
-    float per = perin[y];
-    float av  = ain[y];
-    float bv  = bin[y];
-    float r   = rin[y];
-    float u1  = u1in[y];
-    float u2  = u2in[y];
-    float hw_exp = 0.5f * expt;
-"""
-
 # The contact-split window. Contacts arrive per chain in TAU units and are
 # ordered; clamping into [t1, t2] preserves that order, so an interval whose
 # contact lies outside the window simply has zero width and contributes
@@ -663,156 +646,10 @@ _TAU_EDGES = """
     }
 """
 
-_TAU_FWD_SRC = _TAU_HEAD + """
-    float sphi, cphi, z, acc;
-    if (mode == MODE_NONE) {
-        z = mp_z_of_tau(tau0, per, av, bv, &sphi, &cphi);
-        out[i] = (cphi <= 0.0f) ? 0.0f : mp_phot(z, r, u1, u2);
-        return;
-    }
-    if (mode == MODE_SUPER) {
-        acc = 0.0f;
-        for (int j = 0; j < nsub; ++j) {
-            float frac = (nsub == 1) ? 0.5f
-                                     : (float)j / (float)(nsub - 1);
-            float tt = t1_of(tau0, hw_exp) + 2.0f * hw_exp * frac;
-            z = mp_z_of_tau(tt, per, av, bv, &sphi, &cphi);
-            acc += (cphi <= 0.0f) ? 0.0f : mp_phot(z, r, u1, u2);
-        }
-        out[i] = acc / (float)nsub;
-        return;
-    }
-""" + _TAU_EDGES + """
-    float A = 0.0f, S = 0.0f;
-    for (int iv = 0; iv < 5; ++iv) {
-        float lo = edge[iv], hi = edge[iv + 1];
-        float mid = 0.5f * (lo + hi), hw = 0.5f * (hi - lo);
-        for (int j = 0; j < ngl; ++j) {
-            float w = hw * wg[j];
-            float tt = mid + hw * xg[j];
-            z = mp_z_of_tau(tt, per, av, bv, &sphi, &cphi);
-            float f = (cphi <= 0.0f) ? 0.0f : mp_phot(z, r, u1, u2);
-            A += w * f;
-            S += w;
-        }
-    }
-    out[i] = (S > 0.0f) ? (A / S) : 0.0f;
-"""
-
-# Backward. Per-point gradient in tau (full shape, like flux_dev_metal's gz);
-# per-chain gradients in (per, a, b, r, u1, u2), reduced in-kernel by
-# simd_sum over the ACTIVE lanes exactly as the model VJP does.
-#
-# dz/dtau  = [(a^2 - b^2) sin phi cos phi / z] (2 pi / per)
-# df/dper  = -(df/dtau) * tt / per       (the same chain, reused)
-# dz/da    = a sin^2 phi / z ,  dz/db = b cos^2 phi / z
-_TAU_PAR = ("per", "a", "b", "r", "u1", "u2")
-NTAUPAR = len(_TAU_PAR)
-
-_TAU_VJP_SRC = _TAU_HEAD + """
-    float ctv = ct[i];
-    float sphi, cphi, z, dFdz, dFdr, dFdu1, dFdu2;
-    float p_per = 0.0f, p_a = 0.0f, p_b = 0.0f;
-    float p_r = 0.0f, p_u1 = 0.0f, p_u2 = 0.0f;
-    float g_tau = 0.0f;
-
-    if (mode == MODE_NONE || mode == MODE_SUPER) {
-        int n_node = (mode == MODE_NONE) ? 1 : nsub;
-        float scale = 1.0f / (float)n_node;
-        for (int j = 0; j < n_node; ++j) {
-            float tt;
-            if (mode == MODE_NONE) {
-                tt = tau0;
-            } else {
-                float frac = (nsub == 1) ? 0.5f
-                                         : (float)j / (float)(nsub - 1);
-                tt = t1_of(tau0, hw_exp) + 2.0f * hw_exp * frac;
-            }
-            z = mp_z_of_tau(tt, per, av, bv, &sphi, &cphi);
-            if (cphi <= 0.0f) continue;
-            mp_phot_d(z, r, u1, u2, &dFdz, &dFdr, &dFdu1, &dFdu2);
-            float zi = (z > 0.0f) ? (1.0f / z) : 0.0f;
-            float dzdphi = (av * av - bv * bv) * sphi * cphi * zi;
-            float dfdtau = dFdz * dzdphi * (MP_TWO_PI / per);
-            g_tau += ctv * scale * dfdtau;
-            p_per += ctv * scale * (-dfdtau * tt / per);
-            p_a   += ctv * scale * dFdz * (av * sphi * sphi * zi);
-            p_b   += ctv * scale * dFdz * (bv * cphi * cphi * zi);
-            p_r   += ctv * scale * dFdr;
-            p_u1  += ctv * scale * dFdu1;
-            p_u2  += ctv * scale * dFdu2;
-        }
-    } else {
-""" + _TAU_EDGES + """
-        // accumulate the quadrature AND its exact derivative in tau0
-        float A = 0.0f, S = 0.0f, dA = 0.0f, dS = 0.0f;
-        float a_per = 0.0f, a_a = 0.0f, a_b = 0.0f;
-        float a_r = 0.0f, a_u1 = 0.0f, a_u2 = 0.0f;
-        for (int iv = 0; iv < 5; ++iv) {
-            float lo = edge[iv], hi = edge[iv + 1];
-            float dlo = dedge[iv], dhi = dedge[iv + 1];
-            float mid = 0.5f * (lo + hi), hw = 0.5f * (hi - lo);
-            float dmid = 0.5f * (dlo + dhi), dhw = 0.5f * (dhi - dlo);
-            for (int j = 0; j < ngl; ++j) {
-                float w = hw * wg[j];
-                float dw = dhw * wg[j];
-                float tt = mid + hw * xg[j];
-                float dtt = dmid + dhw * xg[j];
-                z = mp_z_of_tau(tt, per, av, bv, &sphi, &cphi);
-                float f = 0.0f, dfdtt = 0.0f;
-                if (cphi > 0.0f) {
-                    f = mp_phot_d(z, r, u1, u2, &dFdz, &dFdr, &dFdu1, &dFdu2);
-                    float zi = (z > 0.0f) ? (1.0f / z) : 0.0f;
-                    float dzdphi = (av * av - bv * bv) * sphi * cphi * zi;
-                    dfdtt = dFdz * dzdphi * (MP_TWO_PI / per);
-                    // parameter partials integrate with the SAME rule; the
-                    // true integral does not depend on where it is split, so
-                    // the contacts' own parameter dependence is not chased.
-                    a_per += w * (-dfdtt * tt / per);
-                    a_a   += w * dFdz * (av * sphi * sphi * zi);
-                    a_b   += w * dFdz * (bv * cphi * cphi * zi);
-                    a_r   += w * dFdr;
-                    a_u1  += w * dFdu1;
-                    a_u2  += w * dFdu2;
-                }
-                A += w * f;   S += w;
-                dA += dw * f + w * dfdtt * dtt;
-                dS += dw;
-            }
-        }
-        if (S > 0.0f) {
-            float inv = 1.0f / S;
-            g_tau = ctv * (dA * S - A * dS) * inv * inv;
-            p_per = ctv * a_per * inv;  p_a  = ctv * a_a  * inv;
-            p_b   = ctv * a_b   * inv;  p_r  = ctv * a_r  * inv;
-            p_u1  = ctv * a_u1  * inv;  p_u2 = ctv * a_u2 * inv;
-        }
-    }
-
-    gtau[i] = g_tau;
-    p_per = metal::simd_sum(p_per);
-    p_a   = metal::simd_sum(p_a);
-    p_b   = metal::simd_sum(p_b);
-    p_r   = metal::simd_sum(p_r);
-    p_u1  = metal::simd_sum(p_u1);
-    p_u2  = metal::simd_sum(p_u2);
-    if (metal::simd_is_first()) {
-        uint ngrp = ((uint)npts + 31u) / 32u;
-        uint o = y * NTAUPAR_C * ngrp + x / 32u;
-        gpar[o + 0u * ngrp] = p_per;
-        gpar[o + 1u * ngrp] = p_a;
-        gpar[o + 2u * ngrp] = p_b;
-        gpar[o + 3u * ngrp] = p_r;
-        gpar[o + 4u * ngrp] = p_u1;
-        gpar[o + 5u * ngrp] = p_u2;
-    }
-"""
-
 
 def _tau_src(body: str) -> str:
     return _subst(body).replace("MODE_NONE", str(_INT_NONE)).replace(
         "MODE_SUPER", str(_INT_SUPER)).replace(
-        "NTAUPAR_C", f"{NTAUPAR}u").replace(
         "t1_of(tau0, hw_exp)", "(tau0 - hw_exp)")
 
 
@@ -834,9 +671,8 @@ def _tau_src(body: str) -> str:
 # integration is linear, so it commutes with the basis and runs in
 # registers as before, on three accumulators instead of one.
 #
-# These are SEPARATE kernels with their own device functions: the scalar
-# kernels' source is untouched, so ld_basis=False is bit-identical by
-# construction rather than by test alone.
+# These are SEPARATE kernels with their own device functions, so the
+# scalar kernels compile exactly as they would without ld_basis.
 # ---------------------------------------------------------------------------
 
 _PHOT_B_FN = """
@@ -879,63 +715,6 @@ def _swap(src: str, old: str, new: str) -> str:
     return src.replace(old, new)
 
 
-# the basis kernels take no limb darkening at all
-_TAU_HEAD_B = _swap(_TAU_HEAD,
-                    "    float u1  = u1in[y];\n    float u2  = u2in[y];\n", "")
-
-_TAU_FWD_B_SRC = _TAU_HEAD_B + """
-    float sphi, cphi, z;
-    float3 acc;
-    if (mode == MODE_NONE) {
-        z = mp_z_of_tau(tau0, per, av, bv, &sphi, &cphi);
-        acc = (cphi <= 0.0f) ? float3(0.0f) : mp_phot_b(z, r);
-    } else if (mode == MODE_SUPER) {
-        acc = float3(0.0f);
-        for (int j = 0; j < nsub; ++j) {
-            float frac = (nsub == 1) ? 0.5f
-                                     : (float)j / (float)(nsub - 1);
-            float tt = t1_of(tau0, hw_exp) + 2.0f * hw_exp * frac;
-            z = mp_z_of_tau(tt, per, av, bv, &sphi, &cphi);
-            acc += (cphi <= 0.0f) ? float3(0.0f) : mp_phot_b(z, r);
-        }
-        acc = acc / (float)nsub;
-    } else {
-""" + _TAU_EDGES + """
-        float3 A = float3(0.0f);
-        float S = 0.0f;
-        for (int iv = 0; iv < 5; ++iv) {
-            float lo = edge[iv], hi = edge[iv + 1];
-            float mid = 0.5f * (lo + hi), hw = 0.5f * (hi - lo);
-            for (int j = 0; j < ngl; ++j) {
-                float w = hw * wg[j];
-                float tt = mid + hw * xg[j];
-                z = mp_z_of_tau(tt, per, av, bv, &sphi, &cphi);
-                if (cphi > 0.0f) A += w * mp_phot_b(z, r);
-                S += w;
-            }
-        }
-        acc = (S > 0.0f) ? (A / S) : float3(0.0f);
-    }
-    out[3u * i]      = acc.x;
-    out[3u * i + 1u] = acc.y;
-    out[3u * i + 2u] = acc.z;
-"""
-
-# The backward pass is the scalar one with the cotangent moved inside the
-# core: ct . B is a scalar function of (z, r), so contracting first leaves
-# every line of the quadrature-derivative logic -- the Leibniz edge terms,
-# the A/S quotient rule -- exactly as it is, with ctv = 1. Derived by
-# substitution so there is one copy of that logic, not two.
-_TAU_VJP_B_SRC = _swap(_swap(_swap(
-    _TAU_VJP_SRC,
-    _TAU_HEAD, _TAU_HEAD_B),
-    "    float ctv = ct[i];\n",
-    "    float w0 = ct[3u * i] + 0.5f * ct[3u * i + 2u];\n"
-    "    float w1 = ct[3u * i + 1u];\n"
-    "    float w2 = 0.25f * ct[3u * i + 2u];\n"
-    "    float ctv = 1.0f;\n"),
-    "mp_phot_d(z, r, u1, u2, ", "mp_phot_bd(z, r, w0, w1, w2, ")
-
 # z-input basis kernels (flux_dev_metal(..., ld_basis=True)): the same two
 # device functions, one point per thread.
 _ZB_HEAD = """
@@ -961,6 +740,362 @@ _VJP_B_SRC = _ZB_HEAD + """
     gz[i] = dz;
     gr[i] = dr;
 """
+
+
+# ---------------------------------------------------------------------------
+# Orbit-generic tau kernels: the exposure quadrature (and its exact
+# derivative) written ONCE, with the orbit as a plug-in.
+#
+# The quadrature never looks inside the orbit. Per node it needs z, whether
+# the planet is in front, dz/dphi (for tau and the period, both of which
+# enter only through phi = 2 pi tau / P), and dz/dtheta for the orbit's
+# per-chain shape constants theta. Everything else -- the five-interval
+# contact split, the Leibniz edge terms, the A/S quotient, the per-chain
+# simd_sum reduction -- is orbit-independent. Two plug-ins:
+#
+#   circ  theta = (a, b):  z^2 = a^2 sin^2 phi + b^2 cos^2 phi
+#   ecc   theta = (a, ci, ecw, esw, es, ec, b1, a2, b2): the transit-
+#         anchored orbit (anchored.py) on the model kernel's packed
+#         constants. Its Kepler solve is lifted verbatim from _ORBIT, so
+#         the eccentric numerics are one copy shared with the model kernel.
+#
+# Template markers: ORB_LOAD (per-chain loads), ORB_DECL (locals),
+# ORB_Z(t) (sets z, front), ORB_ZD(t) (also dzdphi, dth[]), NTH (theta
+# count), TH_LIVE (how many theta slots this chain reduces: the seven
+# eccentric-only ones are exactly zero on a circular chain -- see
+# _MODEL_VJP_TAIL -- so they are neither reduced nor stored there).
+# ---------------------------------------------------------------------------
+
+# the model kernel's Kepler solve: phi + o_* -> (sind, cosd, omcf)
+_SOLVE = _ORBIT[_ORBIT.index("    float sind, cosd, omcf;\n"):
+                _ORBIT.index("    float r = rin[y];")].replace(
+                    "MP_CBRT2", _CBRT2)
+
+_ECC_FN = """
+// z(tau) on the transit-anchored eccentric orbit, plus what the VJP's
+// chain rules need. o[] is one chain's packed constants in
+// anchored.ORB_COLS order. dth[] = dz/d(a, ci, ecw, esw, es, ec, b1, a2,
+// b2); the derivation is _MODEL_VJP_TAIL's, verbatim.
+inline float mp_z_ecc_d(float tau, float per, float av,
+                        thread const float *o, thread bool *front,
+                        thread float *dzdphi, thread float *dth) {
+    float o_ecw = o[0], o_esw = o[1], o_es = o[2], o_ec = o[3];
+    float o_b1 = o[4], o_a2 = o[5], o_b2 = o[6], o_e = o[7];
+    float o_E0 = o[8], o_Mt = o[9], o_ci = o[10];
+    float phi = MP_TWO_PI * tau / per;
+SOLVE
+    float uu = av * (-o_ecw * omcf - o_b1 * sind);
+    float vv = av * (o_a2 * cosd - o_b2 * sind - o_esw);
+    float vc = vv * o_ci;
+    float z2o = uu * uu + vc * vc;
+    float z = metal::precise::sqrt(max(z2o, KITE_FLOOR));
+    *front = vv > 0.0f;
+    *dzdphi = 0.0f;
+    for (int k = 0; k < 9; ++k) dth[k] = 0.0f;
+    if (z2o > KITE_FLOOR) {
+        float gu = uu / z;
+        float gv = vc * o_ci / z;
+        float dud = av * (-o_ecw * sind - o_b1 * cosd);
+        float dvd = av * (-o_a2 * sind - o_b2 * cosd);
+        float dzdd = gu * dud + gv * dvd;
+        float Dk = 1.0f + o_es * sind - o_ec * cosd;   // == 1 when circular
+        *dzdphi = dzdd / Dk;
+        dth[0] = z / av;
+        dth[1] = vv * vv * o_ci / z;
+        if (o_e != 0.0f) {
+            dth[2] = gu * (-av * omcf);
+            dth[3] = gv * (-av);
+            dth[4] = dzdd * (-omcf / Dk);
+            dth[5] = dzdd * (sind / Dk);
+            dth[6] = gu * (-av * sind);
+            dth[7] = gv * (av * cosd);
+            dth[8] = gv * (-av * sind);
+        }
+    }
+    return z;
+}
+
+// forward only: the derivative outputs are dead and inlining drops them
+inline float mp_z_ecc(float tau, float per, float av,
+                      thread const float *o, thread bool *front) {
+    float dz, dth[9];
+    return mp_z_ecc_d(tau, per, av, o, front, &dz, dth);
+}
+"""
+
+
+def _ecc_header() -> str:
+    return _subst(_ECC_FN.replace("SOLVE", _SOLVE))
+
+
+_TAU_ORBITS = {
+    "circ": dict(
+        inputs=["bin"],
+        load="    float bv  = bin[y];\n",
+        decl="    float sphi, cphi;\n",
+        z="z = mp_z_of_tau(TT, per, av, bv, &sphi, &cphi); "
+          "front = cphi > 0.0f;",
+        zd="z = mp_z_of_tau(TT, per, av, bv, &sphi, &cphi); "
+           "front = cphi > 0.0f;\n"
+           "            float zi = (z > 0.0f) ? (1.0f / z) : 0.0f;\n"
+           "            dzdphi = (av * av - bv * bv) * sphi * cphi * zi;\n"
+           "            dth[0] = av * sphi * sphi * zi;\n"
+           "            dth[1] = bv * cphi * cphi * zi;",
+        theta=("a", "b"), live="2"),
+    "ecc": dict(
+        inputs=["orb"],
+        load="    float o[NORB_I];\n"
+             "    for (int c = 0; c < NORB_I; ++c) "
+             "o[c] = orb[y * NORB_C + (uint)c];\n",
+        decl="",
+        z="z = mp_z_ecc(TT, per, av, o, &front);",
+        zd="z = mp_z_ecc_d(TT, per, av, o, &front, &dzdphi, dth);",
+        theta=("a", "ci", "ecw", "esw", "es", "ec", "b1", "a2", "b2"),
+        live="((o[7] != 0.0f) ? 9 : 2)"),
+}
+
+_TAU_HEAD_G = """
+    uint x = thread_position_in_grid.x;
+    uint y = thread_position_in_grid.y;
+    if (x >= (uint)npts) return;
+    uint i = y * (uint)npts + x;
+
+    float tau0 = taui[i];
+    float per = perin[y];
+    float av  = ain[y];
+ORB_LOAD
+    float r   = rin[y];
+    float u1  = u1in[y];
+    float u2  = u2in[y];
+    float hw_exp = 0.5f * expt;
+"""
+
+_TAU_FWD_G = _TAU_HEAD_G + """
+    float z;
+    bool front;
+ORB_DECL
+    if (mode == MODE_NONE) {
+        ORB_Z(tau0)
+        out[i] = front ? mp_phot(z, r, u1, u2) : 0.0f;
+        return;
+    }
+    if (mode == MODE_SUPER) {
+        float acc = 0.0f;
+        for (int j = 0; j < nsub; ++j) {
+            float frac = (nsub == 1) ? 0.5f
+                                     : (float)j / (float)(nsub - 1);
+            float tt = t1_of(tau0, hw_exp) + 2.0f * hw_exp * frac;
+            ORB_Z(tt)
+            acc += front ? mp_phot(z, r, u1, u2) : 0.0f;
+        }
+        out[i] = acc / (float)nsub;
+        return;
+    }
+""" + _TAU_EDGES + """
+    float A = 0.0f, S = 0.0f;
+    for (int iv = 0; iv < 5; ++iv) {
+        float lo = edge[iv], hi = edge[iv + 1];
+        float mid = 0.5f * (lo + hi), hw = 0.5f * (hi - lo);
+        for (int j = 0; j < ngl; ++j) {
+            float w = hw * wg[j];
+            float tt = mid + hw * xg[j];
+            ORB_Z(tt)
+            float f = front ? mp_phot(z, r, u1, u2) : 0.0f;
+            A += w * f;
+            S += w;
+        }
+    }
+    out[i] = (S > 0.0f) ? (A / S) : 0.0f;
+"""
+
+# the basis forward: the same rule on three accumulators (see _PHOT_B_FN)
+_TAU_FWD_B_G = _swap(_TAU_HEAD_G,
+                     "    float u1  = u1in[y];\n    float u2  = u2in[y];\n",
+                     "") + """
+    float z;
+    bool front;
+ORB_DECL
+    float3 acc;
+    if (mode == MODE_NONE) {
+        ORB_Z(tau0)
+        acc = front ? mp_phot_b(z, r) : float3(0.0f);
+    } else if (mode == MODE_SUPER) {
+        acc = float3(0.0f);
+        for (int j = 0; j < nsub; ++j) {
+            float frac = (nsub == 1) ? 0.5f
+                                     : (float)j / (float)(nsub - 1);
+            float tt = t1_of(tau0, hw_exp) + 2.0f * hw_exp * frac;
+            ORB_Z(tt)
+            acc += front ? mp_phot_b(z, r) : float3(0.0f);
+        }
+        acc = acc / (float)nsub;
+    } else {
+""" + _TAU_EDGES + """
+        float3 A = float3(0.0f);
+        float S = 0.0f;
+        for (int iv = 0; iv < 5; ++iv) {
+            float lo = edge[iv], hi = edge[iv + 1];
+            float mid = 0.5f * (lo + hi), hw = 0.5f * (hi - lo);
+            for (int j = 0; j < ngl; ++j) {
+                float w = hw * wg[j];
+                float tt = mid + hw * xg[j];
+                ORB_Z(tt)
+                if (front) A += w * mp_phot_b(z, r);
+                S += w;
+            }
+        }
+        acc = (S > 0.0f) ? (A / S) : float3(0.0f);
+    }
+    out[3u * i]      = acc.x;
+    out[3u * i + 1u] = acc.y;
+    out[3u * i + 2u] = acc.z;
+"""
+
+# Backward. Per-point gradient in tau (full shape); per-chain gradients in
+# gpar slots (per, theta..., r, u1, u2), reduced in-kernel by simd_sum over
+# the ACTIVE lanes exactly as the model VJP does.
+#   df/dtau = dF/dz dz/dphi (2 pi / per),  df/dper = -(df/dtau) tt / per
+_TAU_VJP_G = _TAU_HEAD_G + """
+    float ctv = ct[i];
+    float z, dFdz, dFdr, dFdu1, dFdu2, dzdphi;
+    bool front;
+    float dth[NTH];
+ORB_DECL
+    float p_per = 0.0f, p_r = 0.0f, p_u1 = 0.0f, p_u2 = 0.0f;
+    float p_th[NTH];
+    for (int k = 0; k < NTH; ++k) p_th[k] = 0.0f;
+    float g_tau = 0.0f;
+
+    if (mode == MODE_NONE || mode == MODE_SUPER) {
+        int n_node = (mode == MODE_NONE) ? 1 : nsub;
+        float scale = 1.0f / (float)n_node;
+        for (int j = 0; j < n_node; ++j) {
+            float tt;
+            if (mode == MODE_NONE) {
+                tt = tau0;
+            } else {
+                float frac = (nsub == 1) ? 0.5f
+                                         : (float)j / (float)(nsub - 1);
+                tt = t1_of(tau0, hw_exp) + 2.0f * hw_exp * frac;
+            }
+            ORB_ZD(tt)
+            if (!front) continue;
+            mp_phot_d(z, r, u1, u2, &dFdz, &dFdr, &dFdu1, &dFdu2);
+            float dfdtau = dFdz * dzdphi * (MP_TWO_PI / per);
+            g_tau += ctv * scale * dfdtau;
+            p_per += ctv * scale * (-dfdtau * tt / per);
+            for (int k = 0; k < NTH; ++k)
+                p_th[k] += ctv * scale * dFdz * dth[k];
+            p_r   += ctv * scale * dFdr;
+            p_u1  += ctv * scale * dFdu1;
+            p_u2  += ctv * scale * dFdu2;
+        }
+    } else {
+""" + _TAU_EDGES + """
+        // accumulate the quadrature AND its exact derivative in tau0
+        float A = 0.0f, S = 0.0f, dA = 0.0f, dS = 0.0f;
+        float a_per = 0.0f, a_r = 0.0f, a_u1 = 0.0f, a_u2 = 0.0f;
+        float a_th[NTH];
+        for (int k = 0; k < NTH; ++k) a_th[k] = 0.0f;
+        for (int iv = 0; iv < 5; ++iv) {
+            float lo = edge[iv], hi = edge[iv + 1];
+            float dlo = dedge[iv], dhi = dedge[iv + 1];
+            float mid = 0.5f * (lo + hi), hw = 0.5f * (hi - lo);
+            float dmid = 0.5f * (dlo + dhi), dhw = 0.5f * (dhi - dlo);
+            for (int j = 0; j < ngl; ++j) {
+                float w = hw * wg[j];
+                float dw = dhw * wg[j];
+                float tt = mid + hw * xg[j];
+                float dtt = dmid + dhw * xg[j];
+                ORB_ZD(tt)
+                float f = 0.0f, dfdtt = 0.0f;
+                if (front) {
+                    f = mp_phot_d(z, r, u1, u2, &dFdz, &dFdr, &dFdu1, &dFdu2);
+                    dfdtt = dFdz * dzdphi * (MP_TWO_PI / per);
+                    // parameter partials integrate with the SAME rule; the
+                    // true integral does not depend on where it is split, so
+                    // the contacts' own parameter dependence is not chased.
+                    a_per += w * (-dfdtt * tt / per);
+                    for (int k = 0; k < NTH; ++k)
+                        a_th[k] += w * dFdz * dth[k];
+                    a_r   += w * dFdr;
+                    a_u1  += w * dFdu1;
+                    a_u2  += w * dFdu2;
+                }
+                A += w * f;   S += w;
+                dA += dw * f + w * dfdtt * dtt;
+                dS += dw;
+            }
+        }
+        if (S > 0.0f) {
+            float inv = 1.0f / S;
+            g_tau = ctv * (dA * S - A * dS) * inv * inv;
+            p_per = ctv * a_per * inv;
+            for (int k = 0; k < NTH; ++k) p_th[k] = ctv * a_th[k] * inv;
+            p_r  = ctv * a_r  * inv;
+            p_u1 = ctv * a_u1 * inv;
+            p_u2 = ctv * a_u2 * inv;
+        }
+    }
+
+    gtau[i] = g_tau;
+    int n_live = TH_LIVE;                     // uniform over the simdgroup
+    p_per = metal::simd_sum(p_per);
+    for (int k = 0; k < NTH; ++k)
+        if (k < n_live) p_th[k] = metal::simd_sum(p_th[k]);
+    p_r   = metal::simd_sum(p_r);
+    p_u1  = metal::simd_sum(p_u1);
+    p_u2  = metal::simd_sum(p_u2);
+    if (metal::simd_is_first()) {
+        uint ngrp = ((uint)npts + 31u) / 32u;
+        uint ob = y * NSLOT_C * ngrp + x / 32u;
+        gpar[ob] = p_per;
+        for (int k = 0; k < NTH; ++k)
+            if (k < n_live) gpar[ob + (1u + (uint)k) * ngrp] = p_th[k];
+        gpar[ob + (1u + NTH_U) * ngrp] = p_r;
+        gpar[ob + (2u + NTH_U) * ngrp] = p_u1;
+        gpar[ob + (3u + NTH_U) * ngrp] = p_u2;
+    }
+"""
+
+
+def _tau_g_src(body: str, orbit: str) -> str:
+    """Instantiate a generic tau kernel body for one orbit plug-in."""
+    import re
+    plug = _TAU_ORBITS[orbit]
+    nth = len(plug["theta"])
+    src = (body.replace("ORB_LOAD\n", plug["load"])
+               .replace("ORB_DECL\n", plug["decl"]))
+    src = re.sub(r"ORB_ZD\((\w+)\)",
+                 lambda m: plug["zd"].replace("TT", m.group(1)), src)
+    src = re.sub(r"ORB_Z\((\w+)\)",
+                 lambda m: plug["z"].replace("TT", m.group(1)), src)
+    src = (src.replace("TH_LIVE", plug["live"])
+              .replace("NSLOT_C", f"{nth + 4}u")
+              .replace("NTH_U", f"{nth}u")
+              .replace("NTH", str(nth))
+              .replace("NORB_I", str(NORB))
+              .replace("NORB_C", f"{NORB}u"))
+    for marker in ("ORB_", "TH_LIVE", "NTH", "NSLOT"):
+        assert marker not in src, f"unexpanded {marker} in tau kernel"
+    return _tau_src(src)
+
+
+def _tau_vjp_b_g(body: str) -> str:
+    """The basis VJP from the scalar one: cotangent contracted into the
+    core first (ct . B is a scalar function of z and r), then ctv = 1:
+    every line of the quadrature-derivative logic -- the Leibniz edge
+    terms, the A/S quotient -- carries over unchanged. Derived by
+    substitution so there is one copy of that logic, not two."""
+    return _swap(_swap(_swap(
+        body,
+        "    float u1  = u1in[y];\n    float u2  = u2in[y];\n", ""),
+        "    float ctv = ct[i];\n",
+        "    float w0 = ct[3u * i] + 0.5f * ct[3u * i + 2u];\n"
+        "    float w1 = ct[3u * i + 1u];\n"
+        "    float w2 = 0.25f * ct[3u * i + 2u];\n"
+        "    float ctv = 1.0f;\n"),
+        "mp_phot_d(z, r, u1, u2, ", "mp_phot_bd(z, r, w0, w1, w2, ")
 
 
 _kernels: dict = {}
@@ -1063,34 +1198,9 @@ def make_model_core_metal(period_ref: float):
 make_ecc_core_metal = make_model_core_metal
 
 
-def _get_tau_kernels():
-    if "tau_fwd" not in _kernels:
-        ins = ["taui", "perin", "ain", "bin", "rin", "u1in", "u2in", "cs",
-               "xg", "wg", "expt", "mode", "ngl", "nsub", "npts"]
-        _kernels["tau_fwd"] = mx.fast.metal_kernel(
-            name="mp_tau_fwd", input_names=ins, output_names=["out"],
-            header=_HEADER + _phot_header(),
-            source=_tau_src(_TAU_FWD_SRC))
-        _kernels["tau_vjp"] = mx.fast.metal_kernel(
-            name="mp_tau_vjp", input_names=ins[:-1] + ["ct", "npts"],
-            output_names=["gtau", "gpar"],
-            header=_HEADER + _phot_header(),
-            source=_tau_src(_TAU_VJP_SRC))
-    return _kernels
-
-
 def _get_basis_kernels():
-    if "tau_fwd_b" not in _kernels:
+    if "fwd_b" not in _kernels:
         hdr = _HEADER + _phot_header() + _phot_b_header()
-        ins = ["taui", "perin", "ain", "bin", "rin", "cs",
-               "xg", "wg", "expt", "mode", "ngl", "nsub", "npts"]
-        _kernels["tau_fwd_b"] = mx.fast.metal_kernel(
-            name="mp_tau_fwd_b", input_names=ins, output_names=["out"],
-            header=hdr, source=_tau_src(_TAU_FWD_B_SRC))
-        _kernels["tau_vjp_b"] = mx.fast.metal_kernel(
-            name="mp_tau_vjp_b", input_names=ins[:-1] + ["ct", "npts"],
-            output_names=["gtau", "gpar"],
-            header=hdr, source=_tau_src(_TAU_VJP_B_SRC))
         _kernels["fwd_b"] = mx.fast.metal_kernel(
             name="mp_flux_fwd_b", input_names=["zin", "rin", "npts"],
             output_names=["out"], header=hdr, source=_subst(_FWD_B_SRC))
@@ -1099,6 +1209,34 @@ def _get_basis_kernels():
             output_names=["gz", "gr"], header=hdr,
             source=_subst(_VJP_B_SRC))
     return _kernels
+
+
+
+def _get_tau_g_kernels(orbit: str, basis: bool):
+    """The generic tau kernels for one orbit plug-in (fwd, vjp)."""
+    key = f"tau_g_{orbit}{'_b' if basis else ''}"
+    if key not in _kernels:
+        hdr = _HEADER + _phot_header()
+        if basis:
+            hdr += _phot_b_header()
+        if orbit == "ecc":
+            hdr += _ecc_header()
+        ins = (["taui", "perin", "ain"] + _TAU_ORBITS[orbit]["inputs"]
+               + ["rin"] + ([] if basis else ["u1in", "u2in"])
+               + ["cs", "xg", "wg", "expt", "mode", "ngl", "nsub", "npts"])
+        fwd = _TAU_FWD_B_G if basis else _TAU_FWD_G
+        vjp = _tau_vjp_b_g(_TAU_VJP_G) if basis else _TAU_VJP_G
+        tag = f"{orbit}{'_b' if basis else ''}"
+        _kernels[key] = (
+            mx.fast.metal_kernel(
+                name=f"mp_tau_g_fwd_{tag}", input_names=ins,
+                output_names=["out"], header=hdr,
+                source=_tau_g_src(fwd, orbit)),
+            mx.fast.metal_kernel(
+                name=f"mp_tau_g_vjp_{tag}", input_names=ins[:-1] + ["ct", "npts"],
+                output_names=["gtau", "gpar"], header=hdr,
+                source=_tau_g_src(vjp, orbit)))
+    return _kernels[key]
 
 
 def metal_available() -> bool:
@@ -1257,7 +1395,40 @@ _INT_MODES = {"none": _INT_NONE, "contact": _INT_CONTACT,
               "supersample": _INT_SUPER}
 
 
-def _contact_taus(r, a, b, period, n):
+#: the eccentric solve's numerical validity ceiling
+#: (docs/eccentric-kernel-notes.md); floors 1 - e^2 exactly as anvil does
+_E_MAX = 0.999
+
+
+def _ecc_shape(a, b, k, h):
+    """(e, e sin w, cos i) from (a, b, secosw, sesinw), b the impact
+    parameter at inferior conjunction:
+
+        b = a cos i (1 - e^2) / (1 + e sin w).
+
+    The same algebra as anvil's ``_ecc_orbit_from_v``, so a sampler fed by
+    either sees one model. e sin w is h sqrt(e), never through w.
+    """
+    e = k * k + h * h
+    esw = h * mx.sqrt(mx.maximum(e, 1e-30))
+    ci = b * (1.0 + esw) / (a * mx.maximum(1.0 - e * e,
+                                           1.0 - _E_MAX * _E_MAX))
+    return e, esw, ci
+
+
+def _ecc_kernel_inputs(period, a, b, r, k, h, n):
+    """(orb, cs) for the eccentric plug-in: the packed anchored constants
+    (their Jacobian to a, b, k, h rides ordinary autodiff, as for the
+    model kernel) and the detached contact times."""
+    from .anchored import pack_orbit_constants
+    from .exposure import contact_offsets_anchored
+    ci = _ecc_shape(a, b, k, h)[2]
+    cs = contact_offsets_anchored(r, a, b, k, h, ci)
+    return (pack_orbit_constants(k, h, ci),
+            _contact_taus(r, a, b, period, n, phases=cs))
+
+
+def _contact_taus(r, a, b, period, n, phases=None):
     """The four contact times as offsets from mid-transit, per chain.
 
     ``contact_offsets`` works in orbital phase; the kernel wants tau, so the
@@ -1269,16 +1440,21 @@ def _contact_taus(r, a, b, period, n):
     parameter gradients nor the tau gradient need to chase the contacts.
     (The window *ends* are a different matter -- those are genuine Leibniz
     boundary terms, and the kernel carries them in ``dedge``.)
+
+    An eccentric orbit passes its own ``phases``
+    (``exposure.contact_offsets_anchored``): exact contacts, not the
+    linearised ones -- a split that misses the kink costs both accuracy
+    and the frozen-split gradient's exactness.
     """
     from .exposure import contact_offsets
-    cs = contact_offsets(r, a, b)
+    cs = contact_offsets(r, a, b) if phases is None else phases
     scale = period / (2.0 * math.pi)
     cols = [mx.reshape(mx.broadcast_to(c * scale, (n,)), (n, 1)) for c in cs]
     return mx.stop_gradient(mx.concatenate(cols, axis=1))
 
 
 def _tau_graph(tau, period, a, b, r, u1, u2, exp_time, mode, n_gl, n_sub,
-               basis=False):
+               basis=False, k=None, h=None):
     """The MLX-graph equivalent of the kernel, used for fp64, the CPU
     stream, and any machine where the kernel probe fails.
 
@@ -1288,13 +1464,20 @@ def _tau_graph(tau, period, a, b, r, u1, u2, exp_time, mode, n_gl, n_sub,
     paths' gradients agree and not merely their values.
 
     ``tau`` is (n, m); the parameters arrive as (n,), one per chain. With
-    ``basis`` the result is (n, m, 3) and ``u1``/``u2`` are unused.
+    ``basis`` the result is (n, m, 3) and ``u1``/``u2`` are unused. Given
+    ``k``/``h`` (secosw, sesinw) the orbit is the transit-anchored
+    eccentric one, ``separation_anchored`` -- the kernel's own solve.
     """
-    from .exposure import contact_offsets, exposure_nodes
+    from .anchored import separation_anchored
+    from .exposure import (contact_offsets, contact_offsets_anchored,
+                           exposure_nodes)
     from .orbit import separation_circular
     from .vjp import flux_dev_analytic, ld_basis_analytic
 
+    ecc = k is not None
     pars = (period, a, b, r) if basis else (period, a, b, r, u1, u2)
+    if ecc:
+        pars = pars + (k, h)
 
     def col(k):
         """Per-chain parameters with ``k`` trailing axes.
@@ -1307,14 +1490,23 @@ def _tau_graph(tau, period, a, b, r, u1, u2, exp_time, mode, n_gl, n_sub,
         """
         return [mx.reshape(p, (-1,) + (1,) * k) for p in pars]
 
-    def inst(tt, k):
+    def inst(tt, nk):
+        cols = col(nk)
+        per, av, bv, rv = cols[:4]
+        if ecc:
+            kv, hv = cols[-2:]
+            ci = _ecc_shape(av, bv, kv, hv)[2]
+            z, front = separation_anchored((2.0 * math.pi) * tt / per,
+                                           kv, hv, av, ci)
+        else:
+            # the circular separation pushes the far side past contact
+            z, front = separation_circular(tt, per, bv, av), None
         if basis:
-            per, av, bv, rv = col(k)
-            return ld_basis_analytic(separation_circular(tt, per, bv, av),
-                                     rv)
-        per, av, bv, rv, u1v, u2v = col(k)
-        return flux_dev_analytic(separation_circular(tt, per, bv, av),
-                                 rv, u1v, u2v)
+            f = ld_basis_analytic(z, rv)
+            front = None if front is None else front[..., None]
+        else:
+            f = flux_dev_analytic(z, rv, *cols[4:6])
+        return f if front is None else mx.where(front, f, 0.0)
 
     # the basis carries a trailing axis of 3; the node axis sits before it
     node_ax = -2 if basis else -1
@@ -1338,7 +1530,13 @@ def _tau_graph(tau, period, a, b, r, u1, u2, exp_time, mode, n_gl, n_sub,
     # the same function, and turin certifies in fp64 what it runs in fp32.
     # The period keeps its gradient where it belongs: in the phase.
     per1, a1, b1, r1 = col(1)[:4]
-    cs = tuple(mx.stop_gradient(c) for c in contact_offsets(r1, a1, b1))
+    if ecc:
+        k1, h1 = col(1)[-2:]
+        ci1 = _ecc_shape(a1, b1, k1, h1)[2]
+        cs = contact_offsets_anchored(r1, a1, b1, k1, h1, ci1)
+    else:
+        cs = contact_offsets(r1, a1, b1)
+    cs = tuple(mx.stop_gradient(c) for c in cs)
     T, W = exposure_nodes(tau, tau * 0.0, mx.stop_gradient(per1),
                           exp_time, cs, int(n_gl), dtype=tau.dtype)
     return mx.sum(inst(T, 2) * (W[..., None] if basis else W), axis=node_ax)
@@ -1347,7 +1545,8 @@ def _tau_graph(tau, period, a, b, r, u1, u2, exp_time, mode, n_gl, n_sub,
 def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1=None, u2=None, *,
                       exp_time: float = 0.0, integration: str = "contact",
                       n_gl: int = 5, n_sub: int = 1,
-                      ld_basis: bool = False) -> mx.array:
+                      ld_basis: bool = False, secosw=None,
+                      sesinw=None) -> mx.array:
     """F - 1 from time-since-mid-transit, with the exposure integrated
     *inside* the kernel.
 
@@ -1366,12 +1565,14 @@ def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1=None, u2=None, *,
     and in every gradient grid.
 
     Args:
-        tau: (n, m) or (m,) times since each point's own mid-transit, in the
-            same units as ``period``. Expected to lie within half a period
-            of it -- that is what "its own" means.
+        tau: (n, m) or (m,) times since each point's own mid-transit
+            (inferior conjunction), in the same units as ``period``.
+            Expected to lie within half a period of it -- that is what "its
+            own" means.
         period, a, b, r, u1, u2: scalars or (n,), broadcast per chain as
             ``flux_dev_metal`` does. ``a`` is a/R*, ``b`` the impact
-            parameter, ``r`` = Rp/R*, ``u1``/``u2`` quadratic limb darkening.
+            parameter at conjunction, ``r`` = Rp/R*, ``u1``/``u2`` quadratic
+            limb darkening.
         exp_time: exposure duration in tau's units; 0 means instantaneous
             (and forces ``integration="none"``).
         integration: ``"contact"`` -- Gauss-Legendre on the exposure window
@@ -1386,6 +1587,14 @@ def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1=None, u2=None, *,
         ld_basis: return the limb-darkening *basis* instead of one
             limb-darkened curve (off by default; see below). ``u1``/``u2``
             are then ignored and may be omitted.
+        secosw, sesinw: (sqrt(e) cos w, sqrt(e) sin w), scalars or (n,).
+            Omit both for a circular orbit (the default). Given, the orbit
+            is the transit-anchored eccentric one (``anchored.py``), the
+            same solve the model kernel runs: exact at e = 0, fp32-safe
+            gradients as e -> 0, valid to e = 0.999. ``b`` stays the impact
+            parameter at conjunction, a cos i (1 - e^2) / (1 + e sin w), so
+            it reduces to the circular b at e = 0; circular and eccentric
+            chains can share one batch.
 
     Returns:
         (n, m) -- or (m,) for 1-D ``tau`` and no per-chain parameters -- of
@@ -1403,10 +1612,14 @@ def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1=None, u2=None, *,
         -- so a caller treating limb darkening as a linear block gets every
         law from one kernel launch. Costs about one scalar call.
 
-    Gradients flow in ``tau`` and in all six parameters (five with
-    ``ld_basis``, which takes a (..., 3) cotangent). fp64, the CPU stream,
-    and machines without a usable Metal device take the MLX graph path,
-    which computes the same function.
+    Gradients flow in ``tau`` and in every parameter (``ld_basis`` drops
+    u1/u2 and takes a (..., 3) cotangent; ``secosw``/``sesinw`` add two).
+    fp64, the CPU stream, and machines without a usable Metal device take
+    the MLX graph path, which computes the same function.
+
+    For an eccentric orbit the contact split uses exact contact times
+    (``exposure.contact_offsets_anchored``: the linearised ones refined by
+    Newton through the anchored solve), so every split sits on its kink.
     """
     mode = _INT_MODES.get(integration)
     if mode is None:
@@ -1420,13 +1633,16 @@ def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1=None, u2=None, *,
         mode = _INT_NONE
     if not ld_basis and (u1 is None or u2 is None):
         raise ValueError("u1 and u2 are required unless ld_basis=True")
+    if (secosw is None) != (sesinw is None):
+        raise ValueError("pass both secosw and sesinw, or neither")
     return _flux_dev_from_tau_impl(tau, period, a, b, r, u1, u2,
                                    float(exp_time), mode, int(n_gl),
-                                   int(n_sub), bool(ld_basis))
+                                   int(n_sub), bool(ld_basis), secosw,
+                                   sesinw)
 
 
 def _flux_dev_from_tau_impl(tau, period, a, b, r, u1, u2, exp_time, mode,
-                            n_gl, n_sub, basis=False):
+                            n_gl, n_sub, basis=False, k=None, h=None):
     if not isinstance(tau, mx.array):
         tau = mx.array(tau)
     if tau.ndim not in (1, 2):
@@ -1440,11 +1656,13 @@ def _flux_dev_from_tau_impl(tau, period, a, b, r, u1, u2, exp_time, mode,
         with mx.stream(mx.cpu):
             return _flux_dev_from_tau_impl(tau, period, a, b, r, u1, u2,
                                            exp_time, mode, n_gl, n_sub,
-                                           basis)
+                                           basis, k, h)
     squeeze = tau.ndim == 1
     tau2d = tau[None, :] if squeeze else tau
     # ld_basis ignores u1/u2 entirely -- including their chain count
-    params = (period, a, b, r) if basis else (period, a, b, r, u1, u2)
+    ecc = k is not None
+    params = ((period, a, b, r) + (() if basis else (u1, u2))
+              + ((k, h) if ecc else ()))
     n_param = max((p.shape[0] if isinstance(p, mx.array) and p.ndim >= 1
                    else 1) for p in params)
     n = max(tau2d.shape[0], n_param)
@@ -1455,108 +1673,102 @@ def _flux_dev_from_tau_impl(tau, period, a, b, r, u1, u2, exp_time, mode,
     if tau2d.shape[0] != n:
         tau2d = mx.broadcast_to(tau2d, (n, tau2d.shape[1]))
 
+    per_c, a_c, b_c, r_c = pc[:4]
+    lds = [] if basis else pc[4:6]
+    kh = pc[-2:] if ecc else [None, None]
+
     if (tau2d.dtype == mx.float32 and _gpu_stream_active()
             and metal_available()):
-        make = _make_tau_basis_core if basis else _make_tau_core
-        out = make(exp_time, mode, n_gl, n_sub)(tau2d, *pc)
-    elif basis:
-        out = _tau_graph(tau2d, *pc, None, None, exp_time, mode, n_gl,
-                         n_sub, basis=True)
+        if ecc:
+            shape, cs = _ecc_kernel_inputs(per_c, a_c, b_c, r_c, *kh, n)
+        else:
+            shape, cs = b_c, _contact_taus(r_c, a_c, b_c, per_c, n)
+        core = _make_tau_core_g(exp_time, mode, n_gl, n_sub,
+                                "ecc" if ecc else "circ", basis)
+        out = core(tau2d, per_c, a_c, shape, r_c, *lds, cs)
     else:
         # the graph path takes the same (n,) parameters as the kernel and
         # adds the trailing axes its own node grid needs
-        out = _tau_graph(tau2d, *pc, exp_time, mode, n_gl, n_sub)
+        u1_c, u2_c = lds if lds else (None, None)
+        out = _tau_graph(tau2d, per_c, a_c, b_c, r_c, u1_c, u2_c, exp_time,
+                         mode, n_gl, n_sub, basis=basis, k=kh[0], h=kh[1])
     return out[0] if squeeze and n == 1 else out
 
 
 _tau_cores: dict = {}
 
 
-def _make_tau_core(exp_time, mode, n_gl, n_sub):
-    """One custom_function per (exposure, mode, order) so the VJP closes
-    over them; cached because building it per call would defeat compile."""
-    key = (float(exp_time), int(mode), int(n_gl), int(n_sub))
+#: per-chain theta slots of the eccentric plug-in that land in the packed
+#: orbit constants (slot 0, "a", is a primal of its own)
+_ECC_TH_COLS = [_ORB_COLS.index(c) for c in _TAU_ORBITS["ecc"]["theta"][1:]]
+
+
+def _make_tau_core_g(exp_time, mode, n_gl, n_sub, orbit, basis):
+    """custom_function over the generic tau kernels.
+
+    Primals: (tau2d, period, a, shape, r, [u1, u2,] cs). ``shape`` is the
+    orbit's own per-chain input -- b (n,) for "circ", the packed anchored
+    constants (n, NORB) for "ecc" -- and ``cs`` the four detached contact
+    times (n, 4), whose gradient is zero by construction (_contact_taus).
+    """
+    key = ("g", orbit, bool(basis), float(exp_time), int(mode), int(n_gl),
+           int(n_sub))
     if key in _tau_cores:
         return _tau_cores[key]
     from .exposure import gauss_legendre
     xg_np, wg_np = gauss_legendre(n_gl)
+    nth = len(_TAU_ORBITS[orbit]["theta"])
+    nslot = nth + 4
 
     def _static(dtype):
         return mx.array(xg_np, dtype=dtype), mx.array(wg_np, dtype=dtype)
 
-    @mx.custom_function
-    def core(tau2d, period, a, b, r, u1, u2):
+    def _fwd(*primals):
+        tau2d = primals[0]
         n, m = tau2d.shape
         xg, wg = _static(tau2d.dtype)
-        cs = _contact_taus(r, a, b, period, n)
-        k = _get_tau_kernels()["tau_fwd"]
-        return k(inputs=[tau2d, period, a, b, r, u1, u2, cs, xg, wg,
-                         exp_time, mode, n_gl, n_sub, int(m)],
-                 output_shapes=[(n, m)], output_dtypes=[mx.float32],
+        k = _get_tau_g_kernels(orbit, basis)[0]
+        return k(inputs=[*primals, xg, wg, exp_time, mode, n_gl, n_sub,
+                         int(m)],
+                 output_shapes=[(n, m, 3) if basis else (n, m)],
+                 output_dtypes=[mx.float32],
                  grid=(m, n, 1), threadgroup=(256, 1, 1))[0]
 
-    @core.vjp
-    def core_vjp(primals, cotangent, output):
-        tau2d, period, a, b, r, u1, u2 = primals
+    def _vjp(primals, cotangent, output):
         ct = cotangent if isinstance(cotangent, mx.array) else cotangent[0]
+        tau2d = primals[0]
         n, m = tau2d.shape
         cols = (m + 31) // 32
         xg, wg = _static(tau2d.dtype)
-        cs = _contact_taus(r, a, b, period, n)
-        k = _get_tau_kernels()["tau_vjp"]
+        k = _get_tau_g_kernels(orbit, basis)[1]
         gtau, gpar = k(
-            inputs=[tau2d, period, a, b, r, u1, u2, cs, xg, wg, exp_time,
-                    mode, n_gl, n_sub, ct, int(m)],
-            output_shapes=[(n, m), (n, NTAUPAR, cols)],
+            inputs=[*primals, xg, wg, exp_time, mode, n_gl, n_sub, ct,
+                    int(m)],
+            output_shapes=[(n, m), (n, nslot, cols)],
             output_dtypes=[mx.float32] * 2, init_value=0.0,
             grid=(m, n, 1), threadgroup=(256, 1, 1))
         g = mx.sum(gpar, axis=2)
-        return (gtau, g[:, 0], g[:, 1], g[:, 2], g[:, 3], g[:, 4], g[:, 5])
+        g_per, g_a = g[:, 0], g[:, 1]
+        if orbit == "circ":
+            g_shape = g[:, 2]
+        else:
+            # the three starter columns stay exactly zero (detached in
+            # anchored.pack_orbit_constants), as in the model kernel
+            g_shape = mx.zeros((n, NORB), dtype=g.dtype)
+            g_shape[:, mx.array(_ECC_TH_COLS)] = g[:, 2:1 + nth]
+        g_r = g[:, 1 + nth]
+        lds = () if basis else (g[:, 2 + nth], g[:, 3 + nth])
+        return (gtau, g_per, g_a, g_shape, g_r, *lds,
+                mx.zeros_like(primals[-1]))
 
-    _tau_cores[key] = core
-    return core
-
-
-def _make_tau_basis_core(exp_time, mode, n_gl, n_sub):
-    """_make_tau_core for ld_basis: (tau, period, a, b, r) -> (n, m, 3)."""
-    key = ("basis", float(exp_time), int(mode), int(n_gl), int(n_sub))
-    if key in _tau_cores:
-        return _tau_cores[key]
-    from .exposure import gauss_legendre
-    xg_np, wg_np = gauss_legendre(n_gl)
-
-    def _static(dtype):
-        return mx.array(xg_np, dtype=dtype), mx.array(wg_np, dtype=dtype)
-
-    @mx.custom_function
-    def core(tau2d, period, a, b, r):
-        n, m = tau2d.shape
-        xg, wg = _static(tau2d.dtype)
-        cs = _contact_taus(r, a, b, period, n)
-        k = _get_basis_kernels()["tau_fwd_b"]
-        return k(inputs=[tau2d, period, a, b, r, cs, xg, wg,
-                         exp_time, mode, n_gl, n_sub, int(m)],
-                 output_shapes=[(n, m, 3)], output_dtypes=[mx.float32],
-                 grid=(m, n, 1), threadgroup=(256, 1, 1))[0]
-
-    @core.vjp
-    def core_vjp(primals, cotangent, output):
-        tau2d, period, a, b, r = primals
-        ct = cotangent if isinstance(cotangent, mx.array) else cotangent[0]
-        n, m = tau2d.shape
-        cols = (m + 31) // 32
-        xg, wg = _static(tau2d.dtype)
-        cs = _contact_taus(r, a, b, period, n)
-        k = _get_basis_kernels()["tau_vjp_b"]
-        gtau, gpar = k(
-            inputs=[tau2d, period, a, b, r, cs, xg, wg, exp_time,
-                    mode, n_gl, n_sub, ct, int(m)],
-            output_shapes=[(n, m), (n, NTAUPAR, cols)],
-            output_dtypes=[mx.float32] * 2, init_value=0.0,
-            grid=(m, n, 1), threadgroup=(256, 1, 1))
-        # gpar shares the scalar layout; its u1/u2 slots are zero here
-        g = mx.sum(gpar[:, :4], axis=2)
-        return (gtau, g[:, 0], g[:, 1], g[:, 2], g[:, 3])
-
+    if basis:
+        @mx.custom_function
+        def core(tau2d, period, a, shape, r, cs):
+            return _fwd(tau2d, period, a, shape, r, cs)
+    else:
+        @mx.custom_function
+        def core(tau2d, period, a, shape, r, u1, u2, cs):
+            return _fwd(tau2d, period, a, shape, r, u1, u2, cs)
+    core.vjp(_vjp)
     _tau_cores[key] = core
     return core

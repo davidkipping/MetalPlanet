@@ -5,6 +5,57 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+### Added
+- **Eccentric orbits on `flux_dev_from_tau`** (`secosw=`, `sesinw=`). Both
+  are omitted by default, and then nothing changes. Given, the orbit is
+  the transit-anchored one (`anchored.py`) and the Kepler solve is the
+  model kernel's own, lifted into a device function. So there is one copy
+  of the eccentric numerics, and it is exact at e = 0 with fp32-safe
+  gradients as e -> 0. `tau` is the time since inferior conjunction and
+  `b` the impact parameter there (anvil's algebra), so e = 0 reduces to
+  the circular call. Gradients flow in all nine inputs. `ld_basis=True`
+  works too, and a batch can mix circular and eccentric chains.
+
+  Measured:
+  - The fp64 graph path agrees with `TransitModel` to <= 6e-16 for the
+    instantaneous and supersampled rules, e = 0 to 0.7.
+  - The fp32 kernel is within 2.5e-7 of that graph.
+  - e = 0 through the eccentric path equals the circular path (1.6e-16
+    fp64).
+  - Cost at 512 x 5,000, contact, n_gl = 5: 2.27x forward and 2.12x
+    value+grad relative to circular for e = 0.3. e = 0 chains in the
+    eccentric kernel cost 1.68x / 1.65x.
+  - 102 tests (`tests/test_tau_ecc.py`); benchmark
+    `benchmarks/bench_tau_ecc.py`.
+
+- **`exposure.contact_offsets_anchored`**: exact contact times for the
+  anchored orbit, refined from the linearised ones by Newton steps
+  through the anchored solve. They agree with bisected roots to 1e-11 d
+  and handle grazing geometry. The linearisation `TransitModel` uses can
+  misplace a contact by 2.3e-3 d on a grazing e = 0.5 orbit. That makes
+  the contact rule 20x less accurate there at n_gl = 5 (2.9e-6 vs
+  1.5e-7). It also puts the jump of dF/dtheta *inside* a quadrature
+  piece, which costs the frozen-split gradient ~1% on d/dperiod. The
+  eccentric tau path uses the exact contacts. `TransitModel` still uses
+  the linearised ones (unchanged).
+
+### Changed
+- **The tau kernels are one orbit-generic template.** The exposure
+  quadrature, its exact tau derivative and the per-chain simd_sum
+  reduction are now written once, with the orbit (circular or anchored
+  eccentric) as a plug-in that supplies z, dz/dphi and dz/dtheta. The
+  circular instantiation is **bitwise identical** to v0.7.0: outputs and
+  every gradient, scalar and `ld_basis`, all three rules, fp32 and fp64
+  (94 arrays). Its speed is unchanged too (0.998x to 1.001x in an
+  interleaved A/B). The four hand-written circular sources it replaces
+  are gone.
+
+### Fixed
+- **README `ld_basis` timings** were measured on a contended machine.
+  Quiet: 14.0 / 13.6 ms forward, 29.5 / 28.3 ms value+grad (scalar /
+  basis). The ratios stand (0.97x / 0.96x). The instantaneous-rule
+  overhead is 1.12x, not 1.30x.
+
 ## [0.7.0] — 2026-10-03
 
 ### Fixed

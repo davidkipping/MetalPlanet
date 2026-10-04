@@ -276,18 +276,61 @@ gradient is bit-identical to 0.6.1. The fp64 graph path takes the same
 keyword and meets the identity to ~1e-17. `flux_dev_metal(z, r,
 ld_basis=True)` does the same for the z-input kernel.
 
-Cost at 512 chains x 5,000 points (`benchmarks/bench_ld_basis.py`;
-each configuration runs in its own process):
+Cost at 512 chains x 5,000 points (`benchmarks/bench_ld_basis.py`; each
+configuration runs in its own process, quiet machine):
 
 | contact rule, n_gl=5 | scalar | `ld_basis=True` | 3 scalar calls |
 |---|---:|---:|---:|
-| forward | 25.9 ms | 24.6 ms (**0.95x**) | 76.9 ms |
-| value+grad | 53.3 ms | 51.9 ms (**0.97x**) | 160.0 ms |
+| forward | 14.0 ms | 13.6 ms (**0.97x**) | 41.2 ms |
+| value+grad | 29.5 ms | 28.3 ms (**0.96x**) | 87.7 ms |
 
-That is the cost of one scalar call, to within noise, and 3.1x faster than
+That is the cost of one scalar call, to within noise, and 3x faster than
 forming three vertex laws one call at a time. For the instantaneous rule,
 where there is almost no arithmetic per output, the larger store shows:
-1.30x forward and 1.08x value+grad.
+1.12x forward and 0.99x value+grad.
+
+### Eccentric orbits: `secosw`, `sesinw`
+
+Pass (sqrt(e) cos w, sqrt(e) sin w) and the orbit becomes the
+transit-anchored eccentric one (`anchored.py`), the same Kepler solve the
+model kernel runs. Omit both, and the call stays circular:
+
+```python
+dev = flux_dev_from_tau(tau, period, a, b, r, u1, u2,
+                        secosw=k, sesinw=h,           # (n,) or scalars
+                        exp_time=29.4 / 60 / 24, integration="contact")
+```
+
+- `tau` is the time since inferior conjunction.
+- `b` is the impact parameter there, a cos i (1 - e^2) / (1 + e sin w).
+  That is the same algebra as anvil's eccentric targets, and it reduces to
+  the circular `b` at e = 0.
+- Gradients flow in all nine inputs. (k, h) stays well conditioned as
+  e -> 0, which is what the anchored form exists for: at exactly e = 0,
+  d/dk = d/dh = 0 and every other gradient equals the circular path's.
+- `ld_basis=True` works on eccentric orbits too.
+- A batch can mix circular (k = h = 0) and eccentric chains.
+
+The contact rule needs the contact times, and for an eccentric orbit
+`TransitModel`'s linearised ones can be off by minutes (2.3e-3 d on a
+grazing e = 0.5 orbit). A split that misses its kink costs accuracy (20x
+there at n_gl = 5). It also costs the frozen-split gradient its
+exactness, because dF/dtheta then jumps inside a Gauss-Legendre piece.
+This path therefore refines the linearised contacts with Newton steps
+through the anchored solve (`exposure.contact_offsets_anchored`), which
+agree with bisected roots to 1e-11 d. With exact contacts, n_gl = 5 is
+accurate to <= 6.8e-7 against the exact integral on every orbit tested,
+the same accuracy the circular rule has.
+
+| 512 x 5,000, contact, n_gl=5 | circular | eccentric, e = 0 | eccentric, e = 0.3 |
+|---|---:|---:|---:|
+| forward | 14.0 ms | 23.6 ms (1.68x) | 31.8 ms (2.27x) |
+| value+grad | 29.5 ms | 48.6 ms (1.65x) | 62.6 ms (2.12x) |
+
+(`benchmarks/bench_tau_ecc.py`.) The eccentric cost is a Kepler solve at
+each of the 25 quadrature nodes. Chains with e = 0 skip the solve, but
+they still run in the larger kernel, so a purely circular fit should
+leave `secosw`/`sesinw` unset.
 
 ## Numerical notes worth knowing
 

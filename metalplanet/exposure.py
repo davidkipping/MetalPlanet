@@ -36,7 +36,7 @@ import mlx.core as mx
 import numpy as np
 
 __all__ = ["gauss_legendre", "contact_offsets", "contact_geometry",
-           "exposure_nodes"]
+           "contact_offsets_anchored", "exposure_nodes"]
 
 
 def gauss_legendre(n: int):
@@ -150,3 +150,60 @@ def exposure_nodes(t, t0, period, exp_time, contacts, n_gl: int,
     # removes round-off).
     W = W / mx.sum(W, axis=axis, keepdims=True)
     return mx.concatenate(times, axis=axis), W
+
+
+def contact_offsets_anchored(r, a, b, k, h, ci, n_iter: int = 4):
+    """Exact contact phases of the transit-anchored eccentric orbit.
+
+    ``contact_offsets`` with ``contact_geometry``'s sky-equivalent a is a
+    linearisation: measured, it misplaces a contact by up to 2.3e-3 d on a
+    grazing e = 0.5 orbit. A split that misses the kink costs the
+    quadrature accuracy (20x there at n_gl = 5) and -- worse for a sampler
+    -- breaks the frozen-split gradient, whose integrand dF/dtheta then
+    jumps *inside* a Gauss-Legendre piece (~1% on d/dperiod at e = 0.7).
+
+    So: start from the linearisation and take ``n_iter`` Newton steps on
+    z(phi)^2 = (1 +- r)^2 through the anchored solve itself, with
+
+        d(z^2)/dphi = 2 (u du/ddelta + ci^2 v dv/ddelta) / D,
+        D = 1 + es sin delta - ec cos delta = 1 - e cos E > 0.
+
+    The linear start is within ~1e-3 in phase, so four steps reach
+    round-off. A contact with no root -- the inner pair of a grazing
+    transit, everything when b >= 1 + r -- keeps its collapsed linearised
+    value, and a step may neither change a contact's sign nor exceed half
+    the linearised outer phase. (k, h) = (secosw, sesinw), ci = cos i.
+    Returns (phi_1, phi_2, phi_3, phi_4), ordered. Callers detach them.
+    """
+    from .anchored import _one_minus_cos, anchor_constants, solve_sincos_delta
+    e, ecw, esw, es, ec, B1, A2, B2 = anchor_constants(k, h)
+    a_sky, _ = contact_geometry(a, e, esw, ci)
+    lin = contact_offsets(r, a_sky, b)
+    lim = 0.5 * mx.abs(lin[3]) + 1e-12
+    out = []
+    for phi0, Z, sgn in zip(lin, (1.0 + r, 1.0 - r, 1.0 - r, 1.0 + r),
+                            (-1.0, -1.0, 1.0, 1.0)):
+        exists = b < Z
+        phi = phi0
+        for _ in range(int(n_iter)):
+            sd, cd = solve_sincos_delta(phi, es, ec)
+            omc = _one_minus_cos(sd, cd)
+            u = a * (-ecw * omc - B1 * sd)
+            v = a * (A2 * cd - B2 * sd - esw)
+            dud = a * (-ecw * sd - B1 * cd)
+            dvd = a * (-A2 * sd - B2 * cd)
+            D = 1.0 + es * sd - ec * cd
+            g = u * u + (v * ci) ** 2 - Z * Z
+            dg = 2.0 * (u * dud + ci * ci * v * dvd) / D
+            ok = mx.logical_and(exists, mx.abs(dg) > 1e-30)
+            step = mx.where(ok, g / mx.where(ok, dg, mx.ones_like(dg)), 0.0)
+            phi = phi - mx.clip(step, -lim, lim)
+            # a root on the other side of conjunction is the wrong contact
+            phi = (mx.minimum(phi, 0.0) if sgn < 0
+                   else mx.maximum(phi, 0.0))
+        out.append(mx.where(exists, phi, phi0))
+    # Newton keeps each contact on its own side, but near-grazing inner
+    # roots can still cross; the edge clamp downstream needs them ordered
+    for i in range(1, 4):
+        out[i] = mx.maximum(out[i], out[i - 1])
+    return tuple(out)
