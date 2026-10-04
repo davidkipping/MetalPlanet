@@ -5,6 +5,8 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-10-04
+
 ### Fixed
 - **`TransitModel(integration="contact")` on eccentric orbits now splits
   each exposure at the exact contact times.** It used the linearised
