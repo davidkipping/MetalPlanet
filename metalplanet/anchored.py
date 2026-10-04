@@ -55,7 +55,8 @@ import mlx.core as mx
 from .kepler import _markley_starter, _unbroadcast
 from .trig import sincos
 
-__all__ = ["anchor_constants", "solve_sincos_delta", "separation_anchored"]
+__all__ = ["anchor_constants", "anchor_constants_ew", "solve_sincos_delta",
+           "separation_anchored"]
 
 _TWO_PI = 2.0 * math.pi
 _PI = math.pi
@@ -103,7 +104,31 @@ def anchor_constants(k, h):
     denom = mx.where(pos, mx.maximum(sq, 1e-30), mx.ones_like(sq))
     cw = mx.where(pos, k / denom, mx.ones_like(k))
     sw = mx.where(pos, h / denom, mx.zeros_like(h))
+    # w from the GUARDED (sin w, cos w), never from (h, k) directly:
+    # arctan2(0, 0) has an undefined gradient, and e = 0 is an interior
+    # point of the (k, h) disc that a sampler genuinely visits.
+    w = mx.arctan2(sw, cw)
+    return _anchor_core(e, ecw, esw, cw, sw, w)
 
+
+def anchor_constants_ew(e, w):
+    """(e, w) -> anchored orbit constants, w in radians: the same tuple as
+    ``anchor_constants``, for callers holding orbital elements.
+
+    (k, h) is the right pair for a *sampler* -- it keeps e -> 0 an interior
+    point. But it is singular as a map from (e, w): dk/de = cos w / (2
+    sqrt e) is infinite at e = 0, so a gradient in e taken through (k, h)
+    is inf * 0 = NaN exactly there, although F is perfectly differentiable
+    in e (one-sided) at e = 0 -- eccentricity changes the duration at
+    first order. With w given, nothing here needs sqrt(e) or a division:
+    every constant is a smooth function of (e, w) on [0, 1) x R, and every
+    w-dependence is multiplied by e, so d/dw is exactly 0 at e = 0.
+    """
+    sw, cw = sincos(w)
+    return _anchor_core(e, e * cw, e * sw, cw, sw, w)
+
+
+def _anchor_core(e, ecw, esw, cw, sw, w):
     beta = mx.sqrt(mx.maximum(1.0 - e * e, 0.0))
     omb = e * e / (1.0 + beta)         # 1 - beta, without cancellation
 
@@ -111,10 +136,6 @@ def anchor_constants(k, h):
     # tan(E0/2) = kk tan(f0/2). Numerator carries the explicit O(e)
     # factor 1 - kk; the denominator is bounded away from zero, and
     # f0/2 in [-pi/4, 3pi/4) never reaches the tan pole.
-    # w from the GUARDED (sin w, cos w), never from (h, k) directly:
-    # arctan2(0, 0) has an undefined gradient, and e = 0 is an interior
-    # point of the (k, h) disc that a sampler genuinely visits.
-    w = mx.arctan2(sw, cw)
     s2, c2 = sincos(0.5 * (0.5 * _PI - w))
     kk = mx.sqrt(mx.maximum((1.0 - e) / (1.0 + e), 0.0))
     one_m_kk = 2.0 * e / ((1.0 + e) * (1.0 + kk))
@@ -195,15 +216,19 @@ def _solve_delta_vjp(primals, cotangents, outputs):
             _unbroadcast(gD * sind, shapes[2]))
 
 
-def separation_anchored(phi, k, h, a, ci, eps: float = 1.1920929e-07):
+def separation_anchored(phi, k, h, a, ci, eps: float = 1.1920929e-07,
+                        consts=None):
     """(z, front) for an eccentric orbit, anchored at inferior conjunction.
 
     phi = 2 pi (t - t0) / P (t0 = transit time), (k, h) the
     (sqrt(e) cos w, sqrt(e) sin w) pair, a in stellar radii, ci = cos i.
     Equivalent to ``kepler.separation_keplerian`` to round-off, and
-    conditioned so that fp32 *gradients* survive e -> 0.
+    conditioned so that fp32 *gradients* survive e -> 0. ``consts``, if
+    given, replaces (k, h) with an ``anchor_constants[_ew]`` tuple.
     """
-    e, ecw, esw, es, ec, B1, A2, B2 = anchor_constants(k, h)
+    if consts is None:
+        consts = anchor_constants(k, h)
+    e, ecw, esw, es, ec, B1, A2, B2 = consts
     sind, cosd = solve_sincos_delta(phi, es, ec)
     omc = _one_minus_cos(sind, cosd)
     u = a * (-ecw * omc - B1 * sind)
@@ -218,7 +243,7 @@ ORB_COLS = ("ecw", "esw", "es", "ec", "b1", "a2", "b2",
             "ecc", "e0", "mtra", "ci")
 
 
-def pack_orbit_constants(k, h, ci):
+def pack_orbit_constants(k, h, ci, consts=None):
     """(k, h, ci) -> (n, 11) per-chain constants for the fused model kernel.
 
     The last three of the first eight columns feed the Cartesian tail and
@@ -227,9 +252,12 @@ def pack_orbit_constants(k, h, ci):
     makes the converged root independent of its starter, and rint is
     locally constant, so their true gradient contribution is zero.
     Detaching also keeps E0 = atan2(es, ec) — undefined at e = 0 — out
-    of the autodiff graph entirely.
+    of the autodiff graph entirely. ``consts``, if given, replaces (k, h)
+    with an ``anchor_constants[_ew]`` tuple.
     """
-    e, ecw, esw, es, ec, B1, A2, B2 = anchor_constants(k, h)
+    if consts is None:
+        consts = anchor_constants(k, h)
+    e, ecw, esw, es, ec, B1, A2, B2 = consts
     E0 = mx.stop_gradient(mx.arctan2(es, ec))
     cols = [ecw, esw, es, ec, B1, A2, B2,
             mx.stop_gradient(e), E0, mx.stop_gradient(E0 - es),

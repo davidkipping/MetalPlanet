@@ -5,6 +5,49 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+### Added
+- **`TransitModel.light_curve_mx` is differentiable in every
+  `TransitParams` field.** Up to 0.8.2 it read each field through
+  `float()`, so a gradient taken through it was silently zero; 0.8.2
+  documented that. It now runs the *compiled* model graphs that
+  `light_curve` uses, with array-valued fields (t0, per, rp, a, inc, ecc,
+  w, fp, `u`) kept in the graph. Python numbers stay constants, and with
+  all-Python parameters the output is `light_curve`'s, bit for bit.
+  Details:
+  - Eccentricity enters as (e, w) through the new
+    `anchored.anchor_constants_ew`. (k, h) is the right pair for a
+    sampler, but it is singular as a map from (e, w): dk/de is infinite
+    at e = 0, so d/d(ecc) taken through it is inf * 0 = NaN, although F
+    is differentiable in e there (one-sided). With w given, the anchored
+    constants need no sqrt(e) and no division. d/d(ecc) at e = 0 now
+    matches a one-sided finite difference, and d/dw is exactly 0 there.
+  - `anchor_constants` is now a front end on a shared core;
+    `separation_anchored`, `contact_offsets_anchored` and
+    `pack_orbit_constants` accept precomputed `consts=`. With the default
+    (k, h) inputs every graph is unchanged: `light_curve`, `light_curves`
+    and the eccentric `flux_dev_from_tau` are bitwise identical to 0.8.2
+    (296 arrays).
+  - The (e, w) route uses the compiled graph rather than the fused model
+    kernel. The kernel skips its eccentric-only gradient slots on e == 0
+    chains, which is exact for (k, h), whose Jacobian vanishes there, but
+    not for (e, w).
+  - Under `mx.grad`, MLX needs the CPU stream for any float64 input. That
+    is MLX's rule, now documented: an fp32 GPU model differentiates fp32
+    fields on the GPU, and an absolute t0, which must be fp64, is
+    differentiated under `mx.stream(mx.cpu)`.
+
+  Measured: every gradient matches fp64 finite differences to ~1e-7
+  (2e-5 gate; 1e-4 for the one-sided e = 0 case under the contact rule),
+  across plain, contact and supersampled modes, all four laws, primary
+  and secondary eclipses, circular, e = 0.3 and e = 0.7. fp32 gradients
+  are within 2e-3 of fp64. A caller can wrap `light_curve_mx` in
+  `mx.compile`. Speed is 1.4-3.3x faster than the old eager path at
+  100,000 points. The eager internals (`_eval`, `_contact_nodes`,
+  `_separation`) are removed, and with them the misleading
+  `test_light_curve_mx_gradient`, which differentiated a hand-built graph
+  rather than the method. 52 tests in `tests/test_light_curve_mx.py`;
+  712 tests green.
+
 ## [0.8.2] — 2026-10-04
 
 ### Fixed

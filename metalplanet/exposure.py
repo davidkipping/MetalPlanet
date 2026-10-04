@@ -159,7 +159,8 @@ def exposure_nodes(t, t0, period, exp_time, contacts, n_gl: int,
     return mx.concatenate(times, axis=axis), W
 
 
-def contact_offsets_anchored(r, a, b, k, h, ci, n_iter: int = 4):
+def contact_offsets_anchored(r, a, b, k, h, ci, n_iter: int = 4,
+                             consts=None):
     """Exact contact phases of the transit-anchored eccentric orbit.
 
     ``contact_offsets`` with ``contact_geometry``'s sky-equivalent a is a
@@ -181,11 +182,14 @@ def contact_offsets_anchored(r, a, b, k, h, ci, n_iter: int = 4):
     value, and a step may neither change a contact's sign nor exceed half
     the linearised outer phase. At e = 0 the linearisation is exact and is
     returned as is, so circular sets are bit-identical to
-    ``contact_offsets``. (k, h) = (secosw, sesinw), ci = cos i.
-    Returns (phi_1, phi_2, phi_3, phi_4), ordered. Callers detach them.
+    ``contact_offsets``. (k, h) = (secosw, sesinw), ci = cos i; ``consts``,
+    if given, replaces (k, h) with an ``anchor_constants[_ew]`` tuple.
+    Returns (phi_1, phi_2, phi_3, phi_4), ordered.
     """
     from .anchored import _one_minus_cos, anchor_constants, solve_sincos_delta
-    e, ecw, esw, es, ec, B1, A2, B2 = anchor_constants(k, h)
+    if consts is None:
+        consts = anchor_constants(k, h)
+    e, ecw, esw, es, ec, B1, A2, B2 = consts
     a_sky, _ = contact_geometry(a, e, esw, ci)
     lin = contact_offsets(r, a_sky, b)
     lim = 0.5 * mx.abs(lin[3]) + 1e-12

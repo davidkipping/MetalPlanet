@@ -48,7 +48,7 @@ import numpy as np
 
 from .flux import flux_dev
 from .metal import flux_dev_metal
-from .anchored import separation_anchored
+from .anchored import anchor_constants_ew, separation_anchored
 from .poly import flux_dev_poly
 from .exposure import (contact_geometry, contact_offsets,
                        contact_offsets_anchored, exposure_nodes)
@@ -78,21 +78,24 @@ class TransitParams:
         self.t_secondary = None   # unused; secondary timing is computed
 
 
-def _ld_coeffs(params) -> tuple[float, float]:
+def _ld_coeffs(params, conv=float) -> tuple[float, float]:
+    """(u1, u2) for the quadratic core, validated. ``conv`` maps each
+    value: float for the traced-scalar paths, a graph-preserving cast for
+    light_curve_mx's differentiable one."""
     law = params.limb_dark
     u = list(params.u) if params.u is not None else []
     if law == "uniform":
         if len(u) != 0:
             raise ValueError("uniform limb darkening takes no coefficients")
-        return 0.0, 0.0
+        return conv(0.0), conv(0.0)
     if law == "linear":
         if len(u) != 1:
             raise ValueError("linear limb darkening takes 1 coefficient")
-        return float(u[0]), 0.0
+        return conv(u[0]), conv(0.0)
     if law == "quadratic":
         if len(u) != 2:
             raise ValueError("quadratic limb darkening takes 2 coefficients")
-        return float(u[0]), float(u[1])
+        return conv(u[0]), conv(u[1])
     if law == "polynomial":
         if len(u) == 0:
             raise ValueError("polynomial limb darkening needs >= 1 "
@@ -102,6 +105,17 @@ def _ld_coeffs(params) -> tuple[float, float]:
         f"limb_dark {law!r} not supported; choose from {_SUPPORTED_LD}. "
         "Non-polynomial laws (nonlinear, squareroot, logarithmic) are "
         "outside the ALFM19 formulation.")
+
+
+_ARRAY_FIELDS = ("t0", "per", "rp", "a", "inc", "ecc", "w", "fp")
+
+
+def _has_arrays(params) -> bool:
+    """Does any field (or limb-darkening coefficient) hold an mx.array?"""
+    if any(isinstance(getattr(params, k, None), mx.array)
+           for k in _ARRAY_FIELDS):
+        return True
+    return any(isinstance(x, mx.array) for x in (params.u or []))
 
 
 class _nullcontext:
@@ -228,60 +242,6 @@ class TransitModel:
     # Python-level dispatch on ecc == 0) selects between two graphs,
     # built lazily and cached per model.
 
-    def _contact_nodes(self, params):
-        """(times, weights) for the contact-split exposure rule, eager."""
-        a = float(params.a)
-        ci = math.cos(math.radians(float(params.inc)))
-        ecc = float(params.ecc)
-        esw = ecc * math.sin(math.radians(float(params.w)))
-        a_sky, b = contact_geometry(a, ecc, esw, ci,
-                                    sqrt=math.sqrt,
-                                    maximum=lambda x, y: max(x, y))
-
-        def s(x):
-            return mx.array(float(x), dtype=self.dtype)
-
-        if ecc == 0.0:
-            cs = contact_offsets(s(params.rp), s(a_sky), s(b))
-        else:
-            # exact contacts: the linearised ones miss the kinks by up to
-            # minutes on an eccentric orbit (exposure.contact_offsets_anchored)
-            w = math.radians(float(params.w))
-            sq = math.sqrt(ecc)
-            cs = contact_offsets_anchored(
-                s(params.rp), s(a), s(b), s(sq * math.cos(w)),
-                s(sq * math.sin(w)), s(ci))
-        return exposure_nodes(self._t_mx, s(params.t0 - self._t_ref),
-                              s(params.per),
-                              s(self.exp_time), cs, self.n_gl,
-                              dtype=self.dtype)
-
-    def _separation(self, params, t=None):
-        """(z, front) over the supersampled grid (or an explicit time
-        array), in the model dtype (eager; used by light_curve_mx and
-        tests)."""
-        per = float(params.per)
-        t0 = float(params.t0) - self._t_ref
-        ecc = float(params.ecc)
-        inc = math.radians(float(params.inc))
-        t = self._t_mx if t is None else t
-        if ecc == 0.0:
-            phase = (2.0 * math.pi / per) * (t - t0)
-            sphi, cphi = sincos(phase)
-            a = float(params.a)
-            b = a * math.cos(inc)
-            z2 = (a * sphi) ** 2 + (b * cphi) ** 2
-            z = mx.sqrt(mx.maximum(z2, 1e-24))
-            return z, cphi > 0.0
-        w = math.radians(float(params.w))
-        phi = (2.0 * math.pi / per) * (t - t0)
-        k = math.sqrt(ecc) * math.cos(w)
-        h = math.sqrt(ecc) * math.sin(w)
-        return separation_anchored(phi, mx.array(k, dtype=self.dtype),
-                                   mx.array(h, dtype=self.dtype),
-                                   mx.array(float(params.a), dtype=self.dtype),
-                                   mx.array(math.cos(inc), dtype=self.dtype))
-
     def _photom(self, z, front, rp, u1, u2, fp, uvec=None):
         if self.transittype == "primary":
             z_eff = mx.where(front, z, 2.0 + z)
@@ -302,23 +262,6 @@ class TransitModel:
         return mx.array(np.asarray(list(params.u), dtype=np.float64),
                         dtype=self.dtype)
 
-    def _eval(self, params) -> mx.array:
-        u1, u2 = _ld_coeffs(params)
-        fp = 0.0 if params.fp is None else float(params.fp)
-        uvec = self._uvec(params)
-        if self.integration == "contact":
-            # the eager path must average too, or light_curve_mx would
-            # quietly return the INSTANTANEOUS flux at the exposure
-            # mid-times while light_curve returns the averaged one
-            T, W = self._contact_nodes(params)
-            z, front = self._separation(params, T)
-            f = self._photom(z, front, float(params.rp), u1, u2, fp,
-                             uvec=uvec)
-            return mx.sum(f * W, axis=1)
-        z, front = self._separation(params)
-        return self._photom(z, front, float(params.rp), u1, u2, fp,
-                            uvec=uvec)
-
     def _kernel_usable(self) -> bool:
         """The fused kernel serves the fp32 GPU *primary*-transit path for
         both circular and eccentric orbits; fp64, CPU streams, secondary
@@ -332,11 +275,23 @@ class TransitModel:
         from .metal import _gpu_stream_active, metal_available
         return metal_available() and _gpu_stream_active()
 
-    def _get_compiled(self, circular: bool):
-        fn = self._compiled.get(circular)
+    def _get_compiled(self, circular: bool, ew: bool = False):
+        """The compiled model graph. ``ew`` selects, for the eccentric
+        graphs, (e, w [rad]) inputs in place of (k, h) -- light_curve_mx's
+        differentiable route, exact at e = 0 (anchored.anchor_constants_ew).
+        With ew=False every graph is exactly what it always was."""
+        key = "ew" if ew else circular
+        fn = self._compiled.get(key)
         if fn is not None:
             return fn
         t = self._t_mx
+        if ew:
+            circular = False
+
+        def consts(k, h):
+            """Keyword for the anchored helpers: nothing in (k, h) mode,
+            so those graphs are unchanged; the (e, w) constants else."""
+            return dict(consts=anchor_constants_ew(k, h)) if ew else {}
 
         poly = bool(self._n_poly)
 
@@ -366,14 +321,19 @@ class TransitModel:
             else:
                 def raw(t0, per, a, k, h, ci, rp, *ld_fp):
                     u1, u2, uv, fp = _unpack_ld(poly, ld_fp)
-                    e = k * k + h * h
-                    esw = h * mx.sqrt(mx.maximum(e, 1e-30))   # e sin w
+                    kw = consts(k, h)
+                    if ew:
+                        e, esw = kw["consts"][0], kw["consts"][2]
+                    else:
+                        e = k * k + h * h
+                        esw = h * mx.sqrt(mx.maximum(e, 1e-30))  # e sin w
                     b_conj = contact_geometry(a, e, esw, ci)[1]
-                    cs = contact_offsets_anchored(rp, a, b_conj, k, h, ci)
+                    cs = contact_offsets_anchored(rp, a, b_conj, k, h, ci,
+                                                  **kw)
                     T, W = exposure_nodes(t, t0, per, ex, cs, n_gl,
                                           dtype=self.dtype)
                     phi = (2.0 * math.pi) * (T - t0) / per
-                    z, front = separation_anchored(phi, k, h, a, ci)
+                    z, front = separation_anchored(phi, k, h, a, ci, **kw)
                     return _avg(z, front, rp, u1, u2, fp, uv, W)
 
         elif circular and poly:
@@ -387,7 +347,8 @@ class TransitModel:
         elif poly:
             def raw(t0, per, a, k, h, ci, rp, uv, fp):
                 phi = (2.0 * math.pi) * (t - t0) / per
-                z, front = separation_anchored(phi, k, h, a, ci)
+                z, front = separation_anchored(phi, k, h, a, ci,
+                                               **consts(k, h))
                 return self._photom(z, front, rp, None, None, fp, uvec=uv)
         elif circular and self._kernel_usable():
             # Circular orbit on the SAME fused kernel as the eccentric one:
@@ -416,8 +377,12 @@ class TransitModel:
                 z = mx.sqrt(mx.maximum((a * sphi) ** 2 + (b * cphi) ** 2,
                                        1e-24))
                 return self._photom(z, cphi > 0.0, rp, u1, u2, fp)
-        elif self._kernel_usable():
-            # Whole eccentric model in one kernel. The anchored Kepler
+        elif self._kernel_usable() and not ew:
+            # Whole eccentric model in one kernel. (Not on the (e, w) route:
+            # the kernel skips its seven eccentric-only gradient slots on
+            # e == 0 chains, which is exact for (k, h) -- whose Jacobian
+            # vanishes there -- but not for (e, w), where d(e cos w)/de =
+            # cos w. The graph below carries every slot.) The anchored Kepler
             # solve as graph ops streams a lot of intermediates: measured
             # 0.23 Gpt/s against the kernel's 2.3, so this is ~10x at
             # large N.
@@ -438,7 +403,8 @@ class TransitModel:
             def raw(t0, per, a, k, h, ci, rp, u1, u2, fp):
                 def col(v):
                     return mx.reshape(v, (1,))
-                orb = pack_orbit_constants(col(k), col(h), col(ci))
+                orb = pack_orbit_constants(col(k), col(h), col(ci),
+                                           **consts(col(k), col(h)))
                 dev = core(xdat, col(t0), col(per), col(rp), col(a), orb,
                            col(u1), col(u2))
                 return 1.0 + mx.reshape(dev, (m,))
@@ -448,11 +414,12 @@ class TransitModel:
             # accurate all the way to e = 0 (see anchored.py).
             def raw(t0, per, a, k, h, ci, rp, u1, u2, fp):
                 phi = (2.0 * math.pi) * (t - t0) / per
-                z, front = separation_anchored(phi, k, h, a, ci)
+                z, front = separation_anchored(phi, k, h, a, ci,
+                                               **consts(k, h))
                 return self._photom(z, front, rp, u1, u2, fp)
 
         fn = mx.compile(raw)
-        self._compiled[circular] = fn
+        self._compiled[key] = fn
         return fn
 
     def _eval_compiled(self, params) -> mx.array:
@@ -648,37 +615,100 @@ class TransitModel:
         return res
 
     def light_curve_mx(self, params) -> mx.array:
-        """Supersampled-grid flux as an MLX array (stays in the graph;
-        no averaging applied) — for building on in MLX.
+        """Model flux as an MLX array that stays in the graph, for building
+        on in MLX -- differentiable in the parameters.
 
-        Note this is the *eager* path: unlike ``light_curve`` it does not
-        go through the mx.compile'd graph or the fused kernels, because
-        it must accept MLX scalars for parameters rather than the Python
-        floats those paths trace. Expect roughly an order of magnitude
-        less throughput at large N; for bulk evaluation use
-        ``light_curve``, and for a sampler use ``metalplanet.anvil``
-        (see docs/sampler-integration.md).
+        Any ``TransitParams`` field may be an ``mx.array`` scalar (t0, per,
+        rp, a, inc, ecc, w, fp, and the entries of ``u``), and gradients
+        flow to every such field. Python numbers stay constants. The model
+        graphs are the compiled ones ``light_curve`` runs, so with all-
+        Python parameters the result is ``light_curve``'s, bit for bit.
 
-        With ``integration="contact"`` the exposure average *is* applied
-        here, so the result matches ``light_curve`` one-for-one. With
-        ``supersample_factor`` it is not: that mode returns the raw
-        supersampled grid, as the summary line says.
+        Returns the flux at the times given at construction, exposure-
+        averaged for ``integration="contact"``. With ``supersample_factor``
+        it is the raw supersampled grid -- reshape to (n_times, factor) and
+        average, as ``light_curve`` does.
 
-        Precision: the graph is built on the model's own stream, as
-        ``light_curve`` does -- for the default ``dtype=mx.float64`` that is
-        the CPU, because MLX has no float64 on Metal. The result is a lazy
-        fp64 array, so whatever you build on it must stay on the CPU too:
-        wrap your downstream ops in ``with mx.stream(mx.cpu):``.
+        Differentiable details:
 
-        Gradients: the ``TransitParams`` fields are read as Python floats,
-        so this is *not* differentiable in them -- a gradient taken through
-        it comes out zero, silently. For a model differentiable in its
-        parameters use ``flux_dev_from_tau`` or ``metalplanet.anvil``.
+        * eccentricity enters as (e, w) directly (``anchor_constants_ew``),
+          so d/d(ecc) is finite and correct at e = 0 -- the one-sided
+          derivative, since e >= 0 -- and d/dw is exactly 0 there. Any
+          array-valued field routes through the eccentric graph, which is
+          exact at e = 0.
+        * the contact-rule nodes move with the parameters, so a gradient
+          is that of the quadrature actually evaluated.
+        * pass t0 as fp64 (a Python float or an fp64 array): an absolute
+          BJD stored in fp32 has already lost its precision (0.25 d at
+          2.45e6), before the model subtracts its reference time in fp64.
+        * under ``mx.grad`` MLX needs the CPU stream for *any* float64
+          input. With an fp32 (GPU) model, differentiate float32 fields on
+          the GPU; for an fp64 field such as an absolute t0, take the
+          gradient inside ``with mx.stream(mx.cpu):`` (or use an fp64
+          model, the default, which lives there anyway).
+        * the array-valued route takes the compiled graph, not the fused
+          eccentric kernel (see _get_compiled), so an fp32 GPU model is a
+          little slower here than through ``light_curve``.
+
+        Precision: the graph is built on the model's own stream -- for the
+        default ``dtype=mx.float64`` that is the CPU, as MLX has no float64
+        on Metal. The result is a lazy fp64 array, so whatever you build on
+        it must stay on the CPU too: wrap your own ops (and ``mx.grad``) in
+        ``with mx.stream(mx.cpu):``.
         """
-        if self._stream is not None:
-            # MLX has no float64 on Metal: build on the CPU, as light_curve
-            # does. Each op keeps its stream, so evaluating it later from
-            # any context works.
-            with mx.stream(self._stream):
-                return self._eval(params)
+        self._check_law(params)
+        ctx = (mx.stream(self._stream) if self._stream is not None
+               else _nullcontext())
+        with ctx:
+            if not _has_arrays(params):
+                return self._eval_compiled(params)
+            return self._eval_graph(params)
+
+    def _eval_graph(self, params) -> mx.array:
+        """light_curve_mx with array-valued fields: every parameter enters
+        the (e, w) eccentric graph as an array, gradients intact."""
+        dt = self.dtype
+
+        def cast(x):
+            if isinstance(x, mx.array):
+                if x.dtype == dt:
+                    return x
+                with mx.stream(mx.cpu):   # an fp64 value may not touch Metal
+                    return x.astype(dt)
+            return mx.array(float(x), dtype=dt)
+
+        def deg(x):                       # degrees -> radians, in-graph
+            if isinstance(x, mx.array):
+                return cast(x) * (math.pi / 180.0)
+            return cast(math.radians(float(x)))
+
+        t0 = params.t0
+        if isinstance(t0, mx.array):
+            # the reference-time subtraction in fp64, then the model dtype
+            with mx.stream(mx.cpu):
+                t0_off = (t0.astype(mx.float64) - self._t_ref).astype(dt)
+        else:
+            t0_off = cast(float(t0) - self._t_ref)
+
+        ecc = params.ecc
+        try:                              # concrete unless traced by compile
+            ev = float(ecc)
+        except Exception:
+            ev = None
+        if ev is not None and not 0.0 <= ev < 1.0:
+            raise ValueError(f"eccentricity must be in [0, 1); got {ev}")
+
+        inc = params.inc
+        if isinstance(inc, mx.array):
+            ci = sincos(deg(inc))[1]      # fp64-accurate (MLX's cos is not)
+        else:
+            ci = cast(math.cos(math.radians(float(inc))))
+        fp = cast(0.0 if params.fp is None else params.fp)
+        if self._n_poly:
+            ld = (mx.stack([cast(x) for x in list(params.u)]),)
+        else:
+            ld = _ld_coeffs(params, conv=cast)
+        return self._get_compiled(False, ew=True)(
+            t0_off, cast(params.per), cast(params.a), cast(ecc),
+            deg(params.w), ci, cast(params.rp), *ld, fp)
         return self._eval(params)

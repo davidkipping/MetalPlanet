@@ -139,46 +139,6 @@ class TestLightCurveMx:
         tol = 1e-14 if m.dtype == mx.float64 else 5e-7
         assert np.abs(got - m.light_curve(p)).max() < tol
 
-    def test_parameters_are_not_differentiable_and_the_docs_say_so(self):
-        """Pinned so a future fix to differentiability updates the docs:
-        today the fields are read as Python floats, the gradient is zero."""
-        p, _ = _params()
-        m = metalplanet.TransitModel(p, T, dtype=mx.float32)
-
-        def f(rp):
-            p.rp = rp
-            return mx.sum(m.light_curve_mx(p))
-
-        assert float(mx.grad(f)(mx.array(0.1))) == 0.0
-        assert "not* differentiable" in m.light_curve_mx.__doc__
-
-
-class TestDifferentiability:
-    def test_light_curve_mx_gradient(self):
-        """The frontend model stays differentiable via light_curve_mx."""
-        p, _ = _params(ecc=0.25, w=63.0)
-        m = metalplanet.TransitModel(p, T)
-
-        def depth_sum(rp):
-            p2 = metalplanet.TransitParams()
-            for k in ("t0", "per", "a", "inc", "ecc", "w", "u", "limb_dark"):
-                setattr(p2, k, getattr(p, k))
-            p2.rp = rp  # mx scalar flows into the graph
-            return mx.sum(m.light_curve_mx(p2))
-
-        # rp enters _eval via float(params.rp) — so probe via mx by
-        # bypassing the float cast: use the low-level core instead
-        with mx.stream(mx.cpu):
-            z, front = m._separation(p)
-            z_eff = mx.where(front, z, 2.0 + z)
-
-            def f(rp):
-                return mx.sum(metalplanet.flux_dev(z_eff, rp, 0.35, 0.22))
-
-            g = mx.grad(f)(mx.array(0.11, dtype=mx.float64))
-            assert bool(mx.isfinite(g))
-            assert float(g) < 0.0  # bigger planet, less flux
-
 
 class TestEccentricKernelRouting:
     """The fp32 GPU primary path (circular and eccentric) is served by the

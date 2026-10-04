@@ -118,6 +118,38 @@ limb-darkening mode works. For fitting with thousands of chains prefer
 `metalplanet.anvil`, which owns the likelihood and the float32
 conditioning too.
 
+## Gradients through the batman-style API: `light_curve_mx`
+
+`light_curve_mx` returns the flux as an MLX array, and it is
+differentiable in every `TransitParams` field. Put an `mx.array` in any
+field you want a gradient for (t0, per, rp, a, inc, ecc, w, fp, the
+entries of `u`); Python numbers stay constants:
+
+```python
+m = metalplanet.TransitModel(params, t)            # fp64, on the CPU
+with mx.stream(mx.cpu):
+    def chi2(rp, ecc):
+        params.rp, params.ecc = rp, ecc
+        return mx.sum(((m.light_curve_mx(params) - y) / yerr) ** 2)
+    g = mx.grad(chi2, argnums=(0, 1))(mx.array(0.1, dtype=mx.float64),
+                                      mx.array(0.0, dtype=mx.float64))
+```
+
+- Eccentricity enters as (e, w) through `anchor_constants_ew`, so
+  d/d(ecc) is finite and correct even at e = 0 (one-sided, since
+  e >= 0), and d/dw is exactly 0 there.
+- The contact rule's nodes move with the parameters, so the gradient is
+  that of the quadrature actually evaluated.
+- All of this is checked against fp64 finite differences for every field,
+  mode, law and transit type.
+- It runs the same compiled graphs as `light_curve`. With all-Python
+  parameters the result is `light_curve`'s, bit for bit. It is 1.4-3.3x
+  faster than the eager path it replaced, which silently returned zero
+  gradients.
+- Under `mx.grad`, MLX needs the CPU stream for any float64 input. With
+  an fp32 GPU model, differentiate float32 fields there; for an absolute
+  t0 (which must be fp64), take the gradient under `mx.stream(mx.cpu)`.
+
 ## The batching rule (read this before writing a sampler)
 
 Batch every walker/chain into one model call — a Python loop over
