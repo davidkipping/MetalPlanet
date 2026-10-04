@@ -5,6 +5,8 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-04
+
 ### Added
 - **Eccentric orbits on `flux_dev_from_tau`** (`secosw=`, `sesinw=`). Both
   are omitted by default, and then nothing changes. Given, the orbit is
