@@ -78,12 +78,44 @@ class TransitParams:
         self.t_secondary = None   # unused; secondary timing is computed
 
 
+def _u_vector(u):
+    """``params.u`` as ONE 1-D vector, whatever it arrived as.
+
+    A list or tuple of numbers, a numpy array and an mx.array all come
+    through here, as does a list holding mx.array scalars (the way to
+    differentiate one coefficient). The result is a float64 numpy vector
+    for host input and an mx.array vector otherwise, and anything that is
+    not exactly one axis raises: a (n, 1) column -- a loadtxt slice, or a
+    nested list -- used to pass the coefficient *count* and then run
+    flux_dev_poly's batched branch as a wrong-order model, and a 0-d
+    mx.array died in list() with an opaque IndexError. One container rule
+    in one place is what makes "every container" true.
+    """
+    if u is None:
+        return np.zeros(0)
+    if isinstance(u, mx.array):
+        v = u
+    elif (isinstance(u, (list, tuple))
+          and any(isinstance(x, mx.array) for x in u)):
+        for x in u:
+            if isinstance(x, mx.array):
+                _need_scalar(x, "u")
+        dt = next(x.dtype for x in u if isinstance(x, mx.array))
+        v = mx.stack([x if isinstance(x, mx.array)
+                      else mx.array(float(x), dtype=dt) for x in u])
+    else:
+        v = np.asarray(u, dtype=np.float64)
+    if v.ndim != 1:
+        raise ValueError(f"u must be a 1-D vector; got shape {tuple(v.shape)}")
+    return v
+
+
 def _ld_coeffs(params, conv=float) -> tuple[float, float]:
     """(u1, u2) for the quadratic core, validated. ``conv`` maps each
     value: float for the traced-scalar paths, a graph-preserving cast for
     light_curve_mx's differentiable one."""
     law = params.limb_dark
-    u = list(params.u) if params.u is not None else []
+    u = _u_vector(params.u)
     if law == "uniform":
         if len(u) != 0:
             raise ValueError("uniform limb darkening takes no coefficients")
@@ -463,20 +495,13 @@ class TransitModel:
             return isinstance(x, mx.array)
 
         # Shapes first, once, before any routing: every per-set field is
-        # one number, and u is a flat vector of them. A route that never
-        # reads a field (w on a circular orbit) still rejects a bad one.
-        for name in ("t0", "per", "rp", "a", "inc", "ecc", "w", "fp"):
+        # one number (u is a flat vector, normalised by _u_vector in
+        # _check_law, which runs before this). A route that never reads a
+        # field (w on a circular orbit) still rejects a bad one.
+        for name in self._BATCH_KEYS:
             x = getattr(params, name)
             if is_arr(x):
                 _need_scalar(x, name)
-        u = params.u
-        if is_arr(u):
-            if u.ndim != 1:
-                raise ValueError(f"u must be a 1-D vector; got shape {u.shape}")
-        elif u is not None:
-            for x in list(u):
-                if is_arr(x):
-                    _need_scalar(x, "u")
 
         def cast(x):
             if is_arr(x):
@@ -484,6 +509,8 @@ class TransitModel:
                     return x
                 with mx.stream(mx.cpu):   # an fp64 value may not touch Metal
                     return x.astype(dt)
+            if isinstance(x, np.ndarray):          # a host u vector
+                return mx.array(x, dtype=dt)
             return mx.array(float(x), dtype=dt)
 
         def rad(x):                       # degrees -> radians
@@ -509,14 +536,7 @@ class TransitModel:
         per, a, rp = cast(params.per), cast(params.a), cast(params.rp)
 
         if self._n_poly:
-            if is_arr(u):
-                uv = cast(u)
-            elif any(is_arr(x) for x in list(u)):
-                uv = mx.stack([cast(x) for x in list(u)])
-            else:
-                uv = mx.array(np.asarray(list(u), dtype=np.float64),
-                              dtype=dt)
-            ld = (uv,)
+            ld = (cast(_u_vector(params.u)),)
         else:
             ld = _ld_coeffs(params, conv=cast)
 
@@ -564,12 +584,12 @@ class TransitModel:
             raise ValueError(
                 "limb-darkening law changed since model construction; "
                 "build a new TransitModel")
-        if self._n_poly and len(list(params.u)) != self._n_poly:
+        n_u = len(_u_vector(params.u))       # shape first, then the count
+        if self._n_poly and n_u != self._n_poly:
             raise ValueError(
                 f"polynomial limb-darkening order changed since model "
-                f"construction ({self._n_poly} -> "
-                f"{len(list(params.u))} coefficients); build a new "
-                f"TransitModel")
+                f"construction ({self._n_poly} -> {n_u} coefficients); "
+                f"build a new TransitModel")
 
     def light_curve(self, params) -> np.ndarray:
         """Model flux at the times given at construction (numpy array)."""
@@ -609,7 +629,8 @@ class TransitModel:
                 # silent NaN row that a sampler reads as -inf
                 self._check_law(p)
                 _ld_coeffs(p)
-            u = np.array([list(p.u) for p in seq], dtype=np.float64)
+            u = np.array([np.asarray(_u_vector(p.u), dtype=np.float64)
+                          for p in seq])
             _check_ecc(cols["ecc"])
             return cols, u
         p = params_seq                       # array-valued TransitParams
@@ -737,7 +758,8 @@ class TransitModel:
         model dtype (b = a cos i, (k, h) = sqrt(e) (cos w, sin w)), which
         on an fp32 model is within ~1 ulp of the host fold (see
         ``_model_eval``). Every field must be a scalar and ``u`` a flat
-        vector; a wrong shape raises before anything is built.
+        vector -- list, tuple, numpy or mx.array, or a list holding
+        mx.array scalars; a wrong shape raises before anything is built.
 
         Returns the flux at the times given at construction, exposure-
         averaged for ``integration="contact"``. With ``supersample_factor``

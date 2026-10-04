@@ -203,33 +203,49 @@ def test_every_field_must_be_a_scalar(dtype, field, shape):
         m = metalplanet.TransitModel(params(ecc=ecc), T, dtype=dtype)
         q = params(ecc=ecc)
         val = 1e-3 if field == "fp" else get(q, field)
+        name = "u" if field == "u0" else field
         with mx.stream(mx.cpu):
             put(q, field, mx.full(shape, val, dtype=mx.float64))
-            with pytest.raises(ValueError, match=f"{field[:1]}.* must be a scalar"):
+            with pytest.raises(ValueError, match=rf"^{name} must be a scalar"):
                 m.light_curve_mx(q)
 
 
 @pytest.mark.parametrize("law,u", [("quadratic", [0.4, 0.25]),
                                    ("polynomial", [0.4, 0.25, 0.05]),
                                    ("polynomial", [0.4])])
-def test_whole_array_u_must_be_a_flat_vector(law, u):
-    """A (3, 1) polynomial u passed _check_law (three entries) and 0.9.4's
-    per-entry check (cast whole, unchecked), then took flux_dev_poly's
-    batched branch: a (3, 601) output of a wrong-order model, 8.8e-4 off,
-    with no error. A (1, 1) one-coefficient u reshaped the output."""
+@pytest.mark.parametrize("container", ["mx", "numpy", "nested_list"])
+def test_u_must_be_a_flat_vector_in_every_container(law, u, container):
+    """One container rule. 0.9.5 checked only an mx.array u: a numpy
+    (3, 1) column or a nested list [[.4], [.25], [.05]] still passed the
+    coefficient count and ran flux_dev_poly's batched branch -- a
+    (3, 601) curve of a wrong-order model, 8.8e-4 off, no error. The
+    shape is now judged before the count, in _check_law, which both
+    entry points and light_curves call first."""
     m = metalplanet.TransitModel(params(limb_dark=law, u=u), T)
     n = len(u)
+    ref = m.light_curve(params(limb_dark=law, u=u))
+
+    def make(shape):
+        if container == "mx":
+            return mx.reshape(mx.array(u, dtype=mx.float64), shape)
+        if container == "numpy":
+            return np.asarray(u, dtype=np.float64).reshape(shape)
+        return np.asarray(u).reshape(shape).tolist()
+
     with mx.stream(mx.cpu):
-        flat = mx.array(u, dtype=mx.float64)
-        ok = np.asarray(m.light_curve_mx(params(limb_dark=law, u=flat)))
-        assert ok.shape == (T.size,)
-        # (1, n) is caught first by _check_law, which counts one entry;
-        # (n, 1) passes that count and needs the shape check
+        ok = np.asarray(m.light_curve_mx(params(limb_dark=law,
+                                                u=make((n,)))))
+        assert np.array_equal(ok, ref)
         for shape in ((n, 1), (1, n)):
-            with pytest.raises(ValueError,
-                               match="u must be a 1-D vector|order changed"):
+            for f in (m.light_curve_mx, m.light_curve, m.light_curves):
+                with pytest.raises(ValueError,
+                                   match="^u must be a 1-D vector"):
+                    bad = params(limb_dark=law, u=make(shape))
+                    f([bad] if f is m.light_curves else bad)
+        if container == "mx":                 # 0-d used to die in list()
+            with pytest.raises(ValueError, match="^u must be a 1-D vector"):
                 m.light_curve_mx(params(limb_dark=law,
-                                        u=mx.reshape(flat, shape)))
+                                        u=mx.array(u[0], dtype=mx.float64)))
 
 
 def test_vector_eccentricity_is_rejected():

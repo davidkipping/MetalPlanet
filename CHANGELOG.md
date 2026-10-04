@@ -5,6 +5,39 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.9.6] — 2026-10-04
+
+Fixes from a sixth code review (of 0.9.5).
+
+### Fixed
+- **0.9.5's 2-D `u` fix covered only an `mx.array`.** A numpy (3, 1)
+  column (a `loadtxt` slice, say) or a nested list `[[.4], [.25], [.05]]`
+  reproduced the identical bug on 0.9.5: a (3, 601) curve of a wrong-order
+  model, 8.8e-4 off, with no error, on a release whose notes said the
+  case now raises. Every container -- list, tuple, numpy, `mx.array`, a
+  list holding `mx.array` scalars -- now goes through one normaliser,
+  `_u_vector`, which returns one 1-D vector or raises
+  `u must be a 1-D vector`. That was the root cause: each container type
+  had been validated by its own code path.
+- **The shape is judged before the count.** `_check_law` runs first in
+  both entry points and in `light_curves`, and it now normalises `u`
+  before counting coefficients. So a 0-d `mx.array` `u`, which died in
+  `list()` with `IndexError: SmallVector out of range`, and a (1, n) `u`,
+  which got a misleading "order changed" message (a message 0.9.5's test
+  had codified), both get the shape error.
+- A quadratic `u` with size-1 numpy entries (a (2, 1) array) ran through
+  numpy's deprecated array-to-float conversion, which a future numpy
+  turns into an opaque `TypeError`; it is now rejected with the same
+  shape error.
+- The up-front scalar loop uses `_BATCH_KEYS` rather than restating it.
+- The scalar-field test matched the first letter of a field name, so it
+  could not tell `per`, `rp` and `fp` apart; it anchors the full name.
+
+The `u` shape test now runs over all three containers, on
+`light_curve_mx`, `light_curve` and `light_curves`. 6 new tests;
+805 green. `light_curve`, `light_curves` and `flux_dev_from_tau` remain
+bitwise identical to 0.8.2 (296 arrays).
+
 ## [0.9.5] — 2026-10-04
 
 Fixes from a fifth code review (of 0.9.4).
