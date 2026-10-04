@@ -71,8 +71,15 @@ def contact_offsets(r, a_sky, b):
     for sign in (1.0, -1.0):          # Z = 1 + r (outer), 1 - r (inner)
         Z = 1.0 + sign * r
         s2 = (Z * Z - b * b) / a2mb2
-        s = mx.sqrt(mx.clip(s2, 0.0, 1.0))
-        out.append(mx.arcsin(s))
+        # A collapsed contact (s2 <= 0: the inner pair of a grazing
+        # transit) sits where d sqrt and d arcsin are infinite, and the
+        # clip's zero cotangent then makes 0 * inf = NaN. So the active
+        # branch sees a sanitised argument and the collapsed value is
+        # detached -- the same values, bit for bit, with finite gradients.
+        inside = mx.logical_and(s2 > 0.0, s2 < 1.0)
+        s2_in = mx.where(inside, s2, mx.full(s2.shape, 0.5, dtype=s2.dtype))
+        edge = mx.stop_gradient(mx.arcsin(mx.sqrt(mx.clip(s2, 0.0, 1.0))))
+        out.append(mx.where(inside, mx.arcsin(mx.sqrt(s2_in)), edge))
     phi_out, phi_in = out
     return -phi_out, -phi_in, phi_in, phi_out
 
@@ -172,7 +179,9 @@ def contact_offsets_anchored(r, a, b, k, h, ci, n_iter: int = 4):
     round-off. A contact with no root -- the inner pair of a grazing
     transit, everything when b >= 1 + r -- keeps its collapsed linearised
     value, and a step may neither change a contact's sign nor exceed half
-    the linearised outer phase. (k, h) = (secosw, sesinw), ci = cos i.
+    the linearised outer phase. At e = 0 the linearisation is exact and is
+    returned as is, so circular sets are bit-identical to
+    ``contact_offsets``. (k, h) = (secosw, sesinw), ci = cos i.
     Returns (phi_1, phi_2, phi_3, phi_4), ordered. Callers detach them.
     """
     from .anchored import _one_minus_cos, anchor_constants, solve_sincos_delta
@@ -183,7 +192,7 @@ def contact_offsets_anchored(r, a, b, k, h, ci, n_iter: int = 4):
     out = []
     for phi0, Z, sgn in zip(lin, (1.0 + r, 1.0 - r, 1.0 - r, 1.0 + r),
                             (-1.0, -1.0, 1.0, 1.0)):
-        exists = b < Z
+        exists = mx.logical_and(b < Z, e > 0.0)
         phi = phi0
         for _ in range(int(n_iter)):
             sd, cd = solve_sincos_delta(phi, es, ec)

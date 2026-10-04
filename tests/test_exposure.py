@@ -120,6 +120,23 @@ class TestConvergence:
         assert (np.abs(m_c.light_curve(p_c) - ref).max()
                 < np.abs(m_s.light_curve(p_s) - ref).max())
 
+    def test_eccentric_splits_sit_on_the_kinks(self):
+        """Exact eccentric contacts (exposure.contact_offsets_anchored).
+        The linearised ones missed by 2.3e-3 d on this orbit, which left
+        the default n_gl = 7 rule at 1.8e-6; on the kinks it is 3e-8,
+        the circular rule's accuracy. The reference is n_gl = 40, which
+        converges to the exact integral however the window is split."""
+        def lc(**kw):
+            p = metalplanet.TransitParams()
+            p.t0, p.per, p.rp, p.a, p.inc = 0.0, 3.4525, 0.2, 10.0, 86.0
+            p.ecc, p.w, p.u, p.limb_dark = 0.5, -40.0, [0.42, 0.31], \
+                "quadratic"
+            t = np.linspace(-0.3, 0.3, 2001)
+            return metalplanet.TransitModel(
+                p, t, exp_time=29.4 / 1440, integration="contact",
+                dtype=mx.float64, **kw).light_curve(p)
+        assert np.abs(lc(n_gl=7) - lc(n_gl=40)).max() < 1e-7
+
 
 class TestIntegrationWithTheRest:
     def test_polynomial_limb_darkening(self):
@@ -152,6 +169,27 @@ class TestIntegrationWithTheRest:
                 f64(0.0), f64(3.456), f64(8.8), f64(b), rp,
                 f64(0.4), f64(0.25), f64(0.0))))(f64(0.1))
             assert bool(mx.isfinite(g)) and float(g) < 0.0
+
+    @pytest.mark.parametrize("ecc,w,inc", [(0.5, -40.0, 86.0),
+                                           (0.3, 63.0, 81.2),     # grazing, b = 0.96
+                                           (1e-6, 200.0, 87.07)])
+    def test_eccentric_gradient_through_exact_contacts(self, ecc, w, inc):
+        """The eccentric graph's contacts are Newton-refined in-graph, so
+        its gradients pass through those iterations: they must be finite
+        in every input, grazing and e -> 0 included."""
+        m, p = _model(ecc, w, exp_time=EXP, integration="contact", n_gl=7)
+        fn = m._get_compiled(False)
+        wr = math.radians(w)
+        vals = (0.0, 3.456, 8.8, math.sqrt(ecc) * math.cos(wr),
+                math.sqrt(ecc) * math.sin(wr), math.cos(math.radians(inc)),
+                0.1, 0.4, 0.25, 0.0)
+        with mx.stream(mx.cpu):
+            args = [mx.array(v, dtype=mx.float64) for v in vals]
+            g = mx.grad(lambda *v: mx.sum(fn(*v)),
+                        argnums=tuple(range(7)))(*args)
+            mx.eval(g)
+        for x in g:
+            assert np.isfinite(np.asarray(x)).all()
 
     def test_validation(self):
         with pytest.raises(ValueError, match="exp_time"):

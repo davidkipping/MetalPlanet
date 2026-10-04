@@ -311,16 +311,16 @@ dev = flux_dev_from_tau(tau, period, a, b, r, u1, u2,
 - `ld_basis=True` works on eccentric orbits too.
 - A batch can mix circular (k = h = 0) and eccentric chains.
 
-The contact rule needs the contact times, and for an eccentric orbit
-`TransitModel`'s linearised ones can be off by minutes (2.3e-3 d on a
-grazing e = 0.5 orbit). A split that misses its kink costs accuracy (20x
-there at n_gl = 5). It also costs the frozen-split gradient its
-exactness, because dF/dtheta then jumps inside a Gauss-Legendre piece.
-This path therefore refines the linearised contacts with Newton steps
-through the anchored solve (`exposure.contact_offsets_anchored`), which
-agree with bisected roots to 1e-11 d. With exact contacts, n_gl = 5 is
-accurate to <= 6.8e-7 against the exact integral on every orbit tested,
-the same accuracy the circular rule has.
+The contact rule needs the contact times. For an eccentric orbit the
+usual linearised ones can be off by minutes (2.3e-3 d on a grazing
+e = 0.5 orbit). A split that misses its kink costs accuracy (20x there at
+n_gl = 5). It also costs the frozen-split gradient its exactness, because
+dF/dtheta then jumps inside a Gauss-Legendre piece. So the linearised
+contacts are refined with Newton steps through the anchored solve
+(`exposure.contact_offsets_anchored`), which agree with bisected roots to
+1e-11 d. `TransitModel(integration="contact")` uses the same exact
+contacts. With them, n_gl = 5 is accurate to <= 6.8e-7 against the exact
+integral on every orbit tested, the same accuracy the circular rule has.
 
 | 512 x 5,000, contact, n_gl=5 | circular | eccentric, e = 0 | eccentric, e = 0.3 |
 |---|---:|---:|---:|

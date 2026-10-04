@@ -4,11 +4,9 @@ The orbit is the transit-anchored one (anchored.py), so tau is time since
 inferior conjunction and b the impact parameter there. What is pinned:
 
 * the fp64 graph path against TransitModel -- an independent route through
-  the same physics, from orbital elements -- to round-off for the
-  instantaneous and supersampled rules;
+  the same physics, from orbital elements -- to round-off, all three rules;
 * the contact rule against the exact integral, with its split points
-  checked against bisected contact roots (exact, not TransitModel's
-  linearised ones -- see exposure.contact_offsets_anchored);
+  checked against bisected contact roots (exposure.contact_offsets_anchored);
 * the fp32 kernel against that graph, values and gradients;
 * e = 0 through the eccentric path against the circular path;
 * ld_basis on an eccentric orbit: the same identity as test_ld_basis;
@@ -97,9 +95,10 @@ GEOMS = [geom(*o[1:]) for o in ORBITS]
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name,g", list(zip(IDS, GEOMS)), ids=IDS)
-@pytest.mark.parametrize("integ,kw", MODES[::2], ids=["none", "supersample"])
+@pytest.mark.parametrize("integ,kw", MODES, ids=[m[0] for m in MODES])
 def test_fp64_graph_matches_transit_model(name, g, integ, kw):
-    ref = api_dev(name, integ, ssf=kw.get("n_sub", 1))
+    ref = api_dev(name, integ, n_gl=kw.get("n_gl", 5),
+                  ssf=kw.get("n_sub", 1))
     got = run(TAU, g, mx.float64, integration=integ, **kw)
     assert np.abs(ref).max() > 1e-3
     assert np.abs(got - ref).max() < 1e-12
@@ -110,8 +109,9 @@ def test_contact_rule_against_the_exact_integral(name, g):
     """n_gl = 40 converges to ~2e-11 however the window is split (a
     misplaced split only slows it), so it stands in for the exact
     integral. n_gl = 5 then has to be as good as the circular rule makes
-    it: measured worst 6.8e-7, on e = 0.7's fast ingress. (TransitModel's
-    linearised contacts reach 2.9e-6 on the e = 0.5 orbit.)"""
+    it: measured worst 6.8e-7, on e = 0.7's fast ingress. (Linearised
+    contacts, as TransitModel used before 0.8.1, reach 2.9e-6 on the
+    e = 0.5 orbit.)"""
     def at(n):
         return run(TAU, g, mx.float64, integration="contact",
                    exp_time=EXP, n_gl=n)

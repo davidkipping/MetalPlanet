@@ -51,7 +51,7 @@ from .metal import flux_dev_metal
 from .anchored import separation_anchored
 from .poly import flux_dev_poly
 from .exposure import (contact_geometry, contact_offsets,
-                       exposure_nodes)
+                       contact_offsets_anchored, exposure_nodes)
 from .solution import sn_dev
 from .trig import sincos
 
@@ -241,7 +241,16 @@ class TransitModel:
         def s(x):
             return mx.array(float(x), dtype=self.dtype)
 
-        cs = contact_offsets(s(params.rp), s(a_sky), s(b))
+        if ecc == 0.0:
+            cs = contact_offsets(s(params.rp), s(a_sky), s(b))
+        else:
+            # exact contacts: the linearised ones miss the kinks by up to
+            # minutes on an eccentric orbit (exposure.contact_offsets_anchored)
+            w = math.radians(float(params.w))
+            sq = math.sqrt(ecc)
+            cs = contact_offsets_anchored(
+                s(params.rp), s(a), s(b), s(sq * math.cos(w)),
+                s(sq * math.sin(w)), s(ci))
         return exposure_nodes(self._t_mx, s(params.t0 - self._t_ref),
                               s(params.per),
                               s(self.exp_time), cs, self.n_gl,
@@ -359,8 +368,8 @@ class TransitModel:
                     u1, u2, uv, fp = _unpack_ld(poly, ld_fp)
                     e = k * k + h * h
                     esw = h * mx.sqrt(mx.maximum(e, 1e-30))   # e sin w
-                    a_sky, b_conj = contact_geometry(a, e, esw, ci)
-                    cs = contact_offsets(rp, a_sky, b_conj)
+                    b_conj = contact_geometry(a, e, esw, ci)[1]
+                    cs = contact_offsets_anchored(rp, a, b_conj, k, h, ci)
                     T, W = exposure_nodes(t, t0, per, ex, cs, n_gl,
                                           dtype=self.dtype)
                     phi = (2.0 * math.pi) * (T - t0) / per
@@ -603,10 +612,11 @@ class TransitModel:
                 u1, u2 = col(u1), col(u2)
 
             if self.integration == "contact":
-                a_sky_np, b_np = contact_geometry(
+                b_np = contact_geometry(
                     cols["a"], ecc, ecc * np.sin(w), np.cos(inc),
-                    sqrt=np.sqrt, maximum=np.maximum)
-                cs = contact_offsets(rp, col(a_sky_np), col(b_np))
+                    sqrt=np.sqrt, maximum=np.maximum)[1]
+                # exact contacts (linearised ones returned as is at e = 0)
+                cs = contact_offsets_anchored(rp, a, col(b_np), k, h, ci)
                 # (7) self._t_mx already holds the (re-centred) grid on
                 # the device -- re-uploading it per call is a pure waste
                 # on the surface the docs tell samplers to use. In contact

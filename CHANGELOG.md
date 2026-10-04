@@ -5,6 +5,30 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+### Fixed
+- **`TransitModel(integration="contact")` on eccentric orbits now splits
+  each exposure at the exact contact times.** It used the linearised
+  contacts (`contact_geometry` + `contact_offsets`). Those can miss a kink
+  by minutes, which degrades the quadrature: at the default n_gl = 7 the
+  worst orbit tested (e = 0.5, grazing-adjacent) was at 1.8e-6 against
+  the exact integral, and is now at 3.1e-8. All three contact sites (the
+  eager path, the compiled eccentric graph and the batched
+  `light_curves`) now call `exposure.contact_offsets_anchored`, as
+  `flux_dev_from_tau` does, and the two now agree to 1e-12 in contact
+  mode as well. Eccentric outputs change by up to 3.1e-6. Circular output
+  is bit-identical: `contact_offsets_anchored` returns the linearisation
+  unchanged at e = 0, where it is exact (40 arrays: all three sites, fp32
+  and fp64, quadratic and polynomial limb darkening).
+- **Grazing transits gave NaN gradients through the contact times**,
+  circular included. Where the clip collapses the inner pair, `sqrt` and
+  `arcsin` sit at an infinite derivative, and the clip's zero cotangent
+  makes 0 * inf = NaN. Only the differentiable frontend graph saw this
+  (`flux_dev_from_tau` detaches its contacts, and the public `TransitModel`
+  methods return plain arrays), so it never reached a user. The active
+  branch now sees a sanitised argument and the collapsed value is
+  detached. Values are bit-identical, and the gradients match finite
+  differences.
+
 ## [0.8.0] — 2026-10-04
 
 ### Added
