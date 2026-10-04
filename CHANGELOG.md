@@ -5,6 +5,50 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-10-04
+
+Fixes from a code review of 0.9.0.
+
+### Fixed
+- **`light_curve_mx` crashed on vector limb darkening.** It failed with a
+  numpy-array `u` (the usual batman style; "truth value of an array is
+  ambiguous") and with an `mx.array` vector `u`, the natural way to
+  differentiate it whole. `light_curve` and 0.8.2 accepted both. The
+  cause was `params.u or []`. Both forms now work, and an `mx.array`
+  vector `u` is differentiable.
+- **An out-of-range eccentricity could return a plausible curve.**
+  - 0.9.0 checked an array-valued `ecc` with `float()` and skipped the
+    check whenever that failed, so under `mx.vmap` or a caller's
+    `mx.compile`, e = 1.5 returned a flat curve. Such an `ecc` is now
+    checked *in the graph*: out of [0, 1) the output is NaN (it cannot
+    raise when traced), and the graph sees a safe e, so a valid point's
+    gradient stays clean beside an invalid one. This also removes a
+    forced evaluation on every call.
+  - Separately, and since long before 0.9.0, single-set
+    `light_curve(params)` with a Python e >= 1 silently returned a flat
+    curve, while `light_curves` raised. Both now raise `ValueError`.
+- **One array field moved a fit off `light_curve`'s graph.** In 0.9.0,
+  any array-valued field sent `light_curve_mx` through the (e, w)
+  eccentric graph, which never uses the fused kernel. Making only `rp`
+  an array on a circular fp32 model then lost the kernel. Routing now
+  follows `ecc`:
+  - a Python 0 takes the circular graph;
+  - a Python e > 0 takes the (k, h) graph, with w in-graph (smooth
+    there, since sqrt(e) is a constant);
+  - only an array-valued `ecc` takes the (e, w) graph.
+
+  At 2e6 points (fp32) the fixed-e routes run at `light_curve`'s speed
+  (0.71 / 0.91 ms against 0.75 / 0.91), against 3.0 ms on the (e, w)
+  route.
+- Dead code: an unreachable `return self._eval(params)` calling a
+  deleted method, and a no-op `consts=` in the fused-kernel branch,
+  which wrongly suggested that branch serves the (e, w) route.
+- `docs/frontend-circular-kernel-plan.md` still called `light_curve_mx`
+  the eager path.
+
+`light_curve`, `light_curves` and `flux_dev_from_tau` are bitwise
+unchanged for every valid input (296 arrays). 15 new tests; 727 green.
+
 ## [0.9.0] — 2026-10-04
 
 ### Added

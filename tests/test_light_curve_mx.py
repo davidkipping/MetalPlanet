@@ -59,10 +59,11 @@ def put(p, k, v):
         setattr(p, k, v)
 
 
-def check_gradients(m, base_kw, tol, ct_seed=0):
-    """Every field's gradient through light_curve_mx against fp64 FD."""
+def check_gradients(m, base_kw, tol, ct_seed=0, fixed=()):
+    """Every field's gradient through light_curve_mx against fp64 FD.
+    ``fixed`` fields stay Python numbers (which selects the route)."""
     p0 = params(**base_kw)
-    names = fields(p0)
+    names = [k for k in fields(p0) if k not in fixed]
     n_out = np.asarray(m.light_curve(p0)).size * m.supersample_factor \
         if m.integration == "supersample" else T.size
     ct = np.random.default_rng(ct_seed).normal(size=n_out)
@@ -193,8 +194,7 @@ def test_array_route_matches_light_curve(dtype, mode, ecc):
         pytest.skip("Metal unavailable")
     p = params(ecc=ecc)
     m = metalplanet.TransitModel(p, T, dtype=dtype, **MODES[mode])
-    q = params(ecc=ecc)
-    q.rp = mx.array(0.1, dtype=dtype)          # any array field will do
+    q = params(ecc=mx.array(ecc, dtype=dtype))   # the (e, w) route
     with (mx.stream(mx.cpu) if dtype == mx.float64 else mx.stream(mx.gpu)):
         got = np.asarray(m.light_curve_mx(q), dtype=np.float64)
     if mode == "supersample":
@@ -240,11 +240,96 @@ def test_callers_compile_and_grad():
     assert abs(float(ge) - float(ge2)) < 1e-9 * max(abs(float(ge2)), 1.0)
 
 
-def test_eccentricity_is_validated():
+@pytest.mark.parametrize("bad", [-0.1, 1.0, 1.2])
+def test_python_eccentricity_out_of_range_raises(bad):
+    """Both entry points (light_curve used to return a flat curve for
+    e >= 1; light_curves always raised)."""
     m = metalplanet.TransitModel(params(), T)
-    for bad in (-0.1, 1.0):
+    for f in (m.light_curve, m.light_curve_mx):
         with pytest.raises(ValueError, match="eccentricity"):
-            m.light_curve_mx(params(ecc=mx.array(bad, dtype=mx.float64)))
+            f(params(ecc=bad))
+    with pytest.raises(ValueError, match="eccentricity"):     # array route
+        m.light_curve_mx(params(ecc=bad, rp=mx.array(0.1, dtype=mx.float64)))
+
+
+def test_array_eccentricity_out_of_range_is_nan_everywhere():
+    """An array-valued e may be traced, so it cannot raise: out of range
+    it returns NaN -- directly, under vmap, and under a caller's compile
+    -- never a plausible curve (e = 1.5 used to give a flat one)."""
+    m = metalplanet.TransitModel(params(), T)
+    with mx.stream(mx.cpu):
+        f64 = lambda v: mx.array(v, dtype=mx.float64)
+        for bad in (-0.1, 1.0, 1.5):
+            assert np.isnan(np.asarray(
+                m.light_curve_mx(params(ecc=f64(bad))))).all()
+        rows = mx.vmap(lambda e: m.light_curve_mx(params(ecc=e)))(
+            f64([0.1, 1.5, -0.1]))
+        comp = mx.compile(lambda e: m.light_curve_mx(params(ecc=e)))(
+            f64(-0.1))
+        mx.eval(rows, comp)
+        good = m.light_curve(params(ecc=0.1))
+        rows = np.asarray(rows)
+        assert np.abs(rows[0] - good).max() < 1e-14
+        assert np.isnan(rows[1:]).all() and np.isnan(np.asarray(comp)).all()
+        # and a valid point's gradient is clean beside an invalid one
+        g = mx.grad(lambda e: mx.sum(mx.vmap(lambda x: m.light_curve_mx(
+            params(ecc=x)))(e)[0]))(f64([0.1, 1.5]))
+        mx.eval(g)
+    assert np.isfinite(np.asarray(g)[0])
+
+
+@pytest.mark.parametrize("law,u", [("quadratic", [0.4, 0.25]),
+                                   ("polynomial", [0.4, 0.25, 0.05])])
+@pytest.mark.parametrize("kind", ["numpy", "mx_vector"])
+def test_vector_limb_darkening(law, u, kind):
+    """u as a numpy array (batman style) or an mx vector (to differentiate
+    it whole); both used to crash light_curve_mx."""
+    m = metalplanet.TransitModel(params(limb_dark=law, u=u), T)
+    ref = m.light_curve(params(limb_dark=law, u=u))
+    with mx.stream(mx.cpu):
+        uu = (np.array(u) if kind == "numpy"
+              else mx.array(u, dtype=mx.float64))
+        got = np.asarray(m.light_curve_mx(params(limb_dark=law, u=uu)))
+        assert np.abs(got - ref).max() < 1e-14
+        if kind == "mx_vector":
+            g = np.asarray(mx.grad(lambda v: mx.sum(m.light_curve_mx(
+                params(limb_dark=law, u=v))))(mx.array(u, dtype=mx.float64)))
+            for j in range(len(u)):
+                h = 1e-6
+                up, um = list(u), list(u)
+                up[j] += h
+                um[j] -= h
+                fd = (m.light_curve(params(limb_dark=law, u=up)).sum()
+                      - m.light_curve(params(limb_dark=law, u=um)).sum()
+                      ) / (2 * h)
+                assert abs(g[j] - fd) < 1e-6 * max(abs(fd), 1.0), j
+
+
+# ---------------------------------------------------------------------------
+# routing: only an array-valued ecc takes the (e, w) graph
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("ecc,key", [(0.0, True), (0.3, False)],
+                         ids=["circular", "e0.3"])
+@pytest.mark.parametrize("mode", MODES)
+def test_fixed_eccentricity_keeps_light_curves_graph(ecc, key, mode):
+    """With a Python ecc, light_curve_mx differentiating every other field
+    runs light_curve's own compiled graph (and its fused kernel on fp32),
+    and its gradients are right there too."""
+    m = metalplanet.TransitModel(params(ecc=ecc), T, **MODES[mode])
+    check_gradients(m, dict(ecc=ecc), tol=2e-5, fixed=("ecc",))
+    assert set(m._compiled) <= {True, False} and key in m._compiled
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+@pytest.mark.parametrize("ecc", [0.0, 0.3], ids=["circular", "e0.3"])
+def test_fp32_fixed_eccentricity_uses_the_fused_kernel(ecc):
+    m = metalplanet.TransitModel(params(ecc=ecc), T, dtype=mx.float32)
+    assert m._kernel_usable()
+    q = params(ecc=ecc, rp=mx.array(0.1), w=mx.array(63.0))
+    got = np.asarray(m.light_curve_mx(q), dtype=np.float64)
+    assert "ew" not in m._compiled
+    assert np.abs(got - m.light_curve(params(ecc=ecc))).max() < 1e-6
 
 
 def test_works_on_the_default_stream():

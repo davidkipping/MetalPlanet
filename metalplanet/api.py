@@ -115,7 +115,12 @@ def _has_arrays(params) -> bool:
     if any(isinstance(getattr(params, k, None), mx.array)
            for k in _ARRAY_FIELDS):
         return True
-    return any(isinstance(x, mx.array) for x in (params.u or []))
+    u = params.u
+    if u is None:                     # not `params.u or []`: u may be an array
+        return False
+    if isinstance(u, mx.array):
+        return True
+    return any(isinstance(x, mx.array) for x in list(u))
 
 
 class _nullcontext:
@@ -403,8 +408,7 @@ class TransitModel:
             def raw(t0, per, a, k, h, ci, rp, u1, u2, fp):
                 def col(v):
                     return mx.reshape(v, (1,))
-                orb = pack_orbit_constants(col(k), col(h), col(ci),
-                                           **consts(col(k), col(h)))
+                orb = pack_orbit_constants(col(k), col(h), col(ci))
                 dev = core(xdat, col(t0), col(per), col(rp), col(a), orb,
                            col(u1), col(u2))
                 return 1.0 + mx.reshape(dev, (m,))
@@ -426,6 +430,9 @@ class TransitModel:
         u1, u2 = _ld_coeffs(params)
         fp = 0.0 if params.fp is None else float(params.fp)
         ecc = float(params.ecc)
+        # math.sqrt below rejects e < 0 by itself, but e >= 1 used to sail
+        # through to a silently flat curve; light_curves already checks
+        _check_ecc(np.array(ecc))
         inc = math.radians(float(params.inc))
 
         def s(x):
@@ -631,11 +638,20 @@ class TransitModel:
 
         Differentiable details:
 
-        * eccentricity enters as (e, w) directly (``anchor_constants_ew``),
-          so d/d(ecc) is finite and correct at e = 0 -- the one-sided
-          derivative, since e >= 0 -- and d/dw is exactly 0 there. Any
-          array-valued field routes through the eccentric graph, which is
-          exact at e = 0.
+        * an array-valued ``ecc`` enters as (e, w) directly
+          (``anchor_constants_ew``), so d/d(ecc) is finite and correct at
+          e = 0 -- the one-sided derivative, since e >= 0 -- and d/dw is
+          exactly 0 there. Out of [0, 1) it returns NaN rather than raising
+          (it may be traced, under vmap or a caller's compile); a Python
+          ``ecc`` out of range raises ValueError.
+        * a Python ``ecc`` keeps ``light_curve``'s own graph -- circular at
+          e = 0, (k, h) above it -- so a fit that differentiates, say, only
+          rp and t0 runs exactly as fast as ``light_curve``, fused kernel
+          included. Only an array-valued ``ecc`` takes the (e, w) graph,
+          which uses the compiled graph rather than the fused kernel (see
+          _get_compiled): measured 3-4x slower on an fp32 GPU model at
+          2e6 points (3.0 vs 0.75-0.91 ms).
+        * ``u`` may be a list, a numpy array, or an mx.array vector.
         * the contact-rule nodes move with the parameters, so a gradient
           is that of the quadrature actually evaluated.
         * pass t0 as fp64 (a Python float or an fp64 array): an absolute
@@ -646,9 +662,6 @@ class TransitModel:
           the GPU; for an fp64 field such as an absolute t0, take the
           gradient inside ``with mx.stream(mx.cpu):`` (or use an fp64
           model, the default, which lives there anyway).
-        * the array-valued route takes the compiled graph, not the fused
-          eccentric kernel (see _get_compiled), so an fp32 GPU model is a
-          little slower here than through ``light_curve``.
 
         Precision: the graph is built on the model's own stream -- for the
         default ``dtype=mx.float64`` that is the CPU, as MLX has no float64
@@ -691,12 +704,11 @@ class TransitModel:
             t0_off = cast(float(t0) - self._t_ref)
 
         ecc = params.ecc
-        try:                              # concrete unless traced by compile
+        if not isinstance(ecc, mx.array):
+            # a Python number is concrete: validate it outright
             ev = float(ecc)
-        except Exception:
-            ev = None
-        if ev is not None and not 0.0 <= ev < 1.0:
-            raise ValueError(f"eccentricity must be in [0, 1); got {ev}")
+            if not 0.0 <= ev < 1.0:
+                raise ValueError(f"eccentricity must be in [0, 1); got {ev}")
 
         inc = params.inc
         if isinstance(inc, mx.array):
@@ -708,7 +720,29 @@ class TransitModel:
             ld = (mx.stack([cast(x) for x in list(params.u)]),)
         else:
             ld = _ld_coeffs(params, conv=cast)
-        return self._get_compiled(False, ew=True)(
-            t0_off, cast(params.per), cast(params.a), cast(ecc),
-            deg(params.w), ci, cast(params.rp), *ld, fp)
-        return self._eval(params)
+        per, a, rp = cast(params.per), cast(params.a), cast(params.rp)
+
+        # Route on what is *not* being differentiated. Only an array-valued
+        # ecc needs the (e, w) graph; a fixed eccentricity keeps light_curve's
+        # own graphs -- and on an fp32 GPU model, the fused kernel.
+        if not isinstance(ecc, mx.array):
+            if ev == 0.0:                 # circular: w is irrelevant
+                return self._get_compiled(True)(t0_off, per, a, a * ci, rp,
+                                                *ld, fp)
+            # e > 0 fixed: (k, h) = sqrt(e) (cos w, sin w) is smooth in w
+            sw, cw = sincos(deg(params.w))
+            sq = math.sqrt(ev)
+            return self._get_compiled(False)(t0_off, per, a, sq * cw,
+                                             sq * sw, ci, rp, *ld, fp)
+        # Differentiating e: the (e, w) graph, exact at e = 0. Its range is
+        # checked IN the graph -- no float(), which would force an eval on
+        # every call and is impossible under vmap / a caller's compile. An
+        # out-of-range e returns NaN, loud where a ValueError cannot be
+        # raised; the graph itself sees a safe e, so no NaN leaks into the
+        # gradients of valid points.
+        e = cast(ecc)
+        ok = mx.logical_and(e >= 0.0, e < 1.0)
+        e_safe = mx.where(ok, e, mx.zeros_like(e))
+        f = self._get_compiled(False, ew=True)(
+            t0_off, per, a, e_safe, deg(params.w), ci, rp, *ld, fp)
+        return mx.where(ok, f, mx.array(float("nan"), dtype=dt))

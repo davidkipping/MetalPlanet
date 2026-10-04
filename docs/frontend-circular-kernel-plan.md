@@ -75,10 +75,13 @@ Mirror `_ecc_kernel_usable` / the contact branch in `api.py`:
   (`test_period_update_is_not_baked_in`).
 - The kernel is **quadratic-only**. Polynomial and secondary-eclipse
   models must keep the graph path.
-- Benchmark `light_curve`, **not** `light_curve_mx`: the latter is the
-  eager path and cannot use the compiled graph or the kernels, which
-  produced a wrong 10x estimate for the eccentric case before it was
-  caught. And pass `dtype=mx.float32` — the default is fp64 on the CPU.
+- Benchmark `light_curve`, **not** `light_curve_mx`: at the time the
+  latter was an eager path that could not use the compiled graph or the
+  kernels, which produced a wrong 10x estimate for the eccentric case
+  before it was caught. (Since v0.9.0 `light_curve_mx` runs the compiled
+  graphs, and since v0.9.1 the fused kernel too unless `ecc` is an
+  array; the advice to benchmark `light_curve` stands.) And pass
+  `dtype=mx.float32` — the default is fp64 on the CPU.
 
 ## Gates
 

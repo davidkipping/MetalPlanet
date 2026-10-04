@@ -143,9 +143,13 @@ with mx.stream(mx.cpu):
 - All of this is checked against fp64 finite differences for every field,
   mode, law and transit type.
 - It runs the same compiled graphs as `light_curve`. With all-Python
-  parameters the result is `light_curve`'s, bit for bit. It is 1.4-3.3x
-  faster than the eager path it replaced, which silently returned zero
-  gradients.
+  parameters the result is `light_curve`'s, bit for bit. While `ecc` is a
+  Python number it keeps `light_curve`'s graph, fused kernel included, so
+  differentiating the other fields costs nothing extra. Only an
+  array-valued `ecc` takes the (e, w) graph, measured 3-4x slower on an
+  fp32 GPU model at 2e6 points.
+- An array-valued `ecc` outside [0, 1) returns NaN, since it may be
+  traced. A Python one raises `ValueError`.
 - Under `mx.grad`, MLX needs the CPU stream for any float64 input. With
   an fp32 GPU model, differentiate float32 fields there; for an absolute
   t0 (which must be fp64), take the gradient under `mx.stream(mx.cpu)`.
