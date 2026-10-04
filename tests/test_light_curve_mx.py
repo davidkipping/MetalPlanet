@@ -172,21 +172,34 @@ def test_fp32_gradients_match_fp64(mode, ecc, ecc_as):
 
 def test_scalar_value_helper():
     """Pins the one MLX dependency behind readable-vs-traced: a scalar
-    reads eagerly and under mx.grad, is None under compile and vmap, and
-    a vector is a caller error rather than 'traced'."""
+    reads eagerly and under mx.grad, and is None under compile and vmap."""
     from metalplanet.api import _scalar_value
-    assert _scalar_value(mx.array(0.3), "e") == pytest.approx(0.3)
+    assert _scalar_value(mx.array(0.3)) == pytest.approx(0.3)
     seen = {}
-    mx.grad(lambda e: (seen.__setitem__("g", _scalar_value(e, "e")),
+    mx.grad(lambda e: (seen.__setitem__("g", _scalar_value(e)),
                        mx.sum(e))[1])(mx.array(0.3))
     assert seen["g"] == pytest.approx(0.3)
-    mx.compile(lambda e: (seen.__setitem__("c", _scalar_value(e, "e")),
+    mx.compile(lambda e: (seen.__setitem__("c", _scalar_value(e)),
                           e)[1])(mx.array(0.3))
-    mx.vmap(lambda e: (seen.__setitem__("v", _scalar_value(e, "e")),
+    mx.vmap(lambda e: (seen.__setitem__("v", _scalar_value(e)),
                        e)[1])(mx.array([0.3]))
     assert seen["c"] is None and seen["v"] is None
-    with pytest.raises(ValueError, match="must be a scalar"):
-        _scalar_value(mx.array([0.3, 0.4]), "e")
+
+
+@pytest.mark.parametrize("field", ["t0", "per", "rp", "a", "inc", "ecc",
+                                   "w", "u0"])
+@pytest.mark.parametrize("shape", [(601,), (1,), (1, 1)],
+                         ids=["vector", "len1", "1x1"])
+def test_every_field_must_be_a_scalar(field, shape):
+    """0.9.3 guarded ecc alone, by size: a (601,) rp ran -- one value per
+    time sample -- and a (1, 1) ecc changed the output's shape."""
+    for ecc in (0.0, 0.3):              # circular and eccentric routes
+        m = metalplanet.TransitModel(params(ecc=ecc), T)
+        q = params(ecc=ecc)
+        with mx.stream(mx.cpu):
+            put(q, field, mx.full(shape, get(q, field), dtype=mx.float64))
+            with pytest.raises(ValueError, match="must be a scalar"):
+                m.light_curve_mx(q)
 
 
 def test_vector_eccentricity_is_rejected():
@@ -219,23 +232,39 @@ def test_ew_route_is_as_accurate_as_the_kh_route_in_fp32():
     kh = m32.light_curve(params())
     ew = np.asarray(m32.light_curve_mx(params(ecc=mx.array(0.3))),
                     dtype=np.float64)
-    ew_w = np.asarray(m32.light_curve_mx(params(ecc=mx.array(0.3),
-                                                w=mx.array(63.0))),
-                      dtype=np.float64)
     assert np.abs(ew - truth).max() <= 1.5 * np.abs(kh - truth).max()
-    assert np.array_equal(ew, ew_w)
+    # host-folded vs in-graph radians agree to 1 fp32 ulp -- not bitwise:
+    # fp32(radians(w)) != fp32(w) * fp32(pi/180) for ~9% of w (13.5, 27,
+    # ...), so a fixture that happened to agree would pin luck
+    ulp = np.finfo(np.float32).eps
+    for w in (63.0, 13.5, 27.0):
+        m = metalplanet.TransitModel(params(w=w), T, dtype=mx.float32)
+        a = np.asarray(m.light_curve_mx(params(w=w, ecc=mx.array(0.3))),
+                       dtype=np.float64)
+        b = np.asarray(m.light_curve_mx(params(ecc=mx.array(0.3),
+                                               w=mx.array(w))),
+                       dtype=np.float64)
+        assert np.abs(a - b).max() <= 2 * ulp, w
 
 
 @pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
-def test_contact_mode_compiles_once_across_streams():
-    """The kernel never serves the contact rule, so its cache key must not
-    split on the stream (0.9.2 compiled the same graph twice)."""
-    m = metalplanet.TransitModel(params(), T, dtype=mx.float32,
-                                 exp_time=EXP, integration="contact")
-    assert not m._kernel_usable()
-    m.light_curve(params())
+@pytest.mark.parametrize("kw", [dict(exp_time=EXP, integration="contact"),
+                                dict(limb_dark="polynomial",
+                                     u=[0.4, 0.25, 0.05])],
+                         ids=["contact", "polynomial"])
+def test_kernel_less_graphs_compile_once_across_streams(kw):
+    """Where no kernel branch is reachable, the cache key must not split
+    on the stream (0.9.2 compiled the contact graph twice). The key is
+    derived from the branch structure in _get_compiled, not from a rule
+    restated in _kernel_usable."""
+    model_kw = {k: v for k, v in kw.items() if k in ("exp_time",
+                                                     "integration")}
+    par_kw = {k: v for k, v in kw.items() if k in ("limb_dark", "u")}
+    m = metalplanet.TransitModel(params(**par_kw), T, dtype=mx.float32,
+                                 **model_kw)
+    m.light_curve(params(**par_kw))
     with mx.stream(mx.cpu):
-        mx.eval(m.light_curve_mx(params(rp=mx.array(0.1))))
+        mx.eval(m.light_curve_mx(params(rp=mx.array(0.1), **par_kw)))
     assert list(m._compiled) == [(False, False)]
 
 

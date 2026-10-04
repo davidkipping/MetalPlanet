@@ -5,6 +5,42 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.9.4] — 2026-10-04
+
+Fixes from a fourth code review (of 0.9.3).
+
+### Fixed
+- **Every field of `light_curve_mx` must be a scalar, not just `ecc`.**
+  0.9.3 guarded `ecc` alone: a vector `rp` (or a, inc, w, t0, per, fp, an
+  entry of u) still ran, one value per time sample, and on the fp32
+  fused-kernel route died with an opaque reshape error. The check is now
+  at the one chokepoint every field passes through (`cast`), including
+  `w` on a circular orbit, where it is otherwise unread.
+- **"Scalar" means shape (), not size 1.** A (1, 1) `ecc` passed 0.9.3's
+  check and changed the output's shape to (1, 601).
+- **The readable-vs-traced helper no longer matches MLX's error text.**
+  With the shape checked first, the traced-eval refusal is the only
+  `ValueError` `float()` can raise, so a plain `except` is both simpler
+  and robust to MLX rewording its message.
+- **The cache key follows `_get_compiled`'s branch structure.** The
+  kernel decision enters the key only where a kernel branch is reachable
+  (not (e, w), not polynomial, not the contact rule), computed beside
+  those branches rather than restated in `_kernel_usable`. A polynomial
+  fp32 model, which 0.9.3 still compiled once per stream, now compiles
+  once.
+- **Docstring: an array `a` on an eccentric orbit is bitwise with
+  `light_curve`** (it enters the (k, h) graph as it is); only `inc`,
+  `w`, and `a` on a circular orbit combine in-graph.
+- **A claim in 0.9.3's notes was too strong.** A Python `w` and an array
+  `w` do not give the identical (e, w) result in general: fp32(radians(w))
+  differs from fp32(w) * fp32(pi/180) for ~9% of w values (13.5, 27, ...),
+  so the fixture's w = 63 agreed by luck. They agree to 1 fp32 ulp, and
+  the test now asserts that over w = 63, 13.5 and 27.
+
+24 new tests (every field x three bad shapes x both routes); 766 green.
+`light_curve`, `light_curves` and `flux_dev_from_tau` remain bitwise
+identical to 0.8.2 (296 arrays).
+
 ## [0.9.3] — 2026-10-04
 
 Fixes from a third code review (of 0.9.2).
