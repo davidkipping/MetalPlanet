@@ -246,6 +246,49 @@ device take an MLX graph path that computes the *same* function —
 including freezing the quadrature's split points, so a gradient certified
 in fp64 is the gradient that runs in fp32.
 
+### Limb darkening as a linear block: `ld_basis=True`
+
+A quadratic-limb-darkened light curve is linear in the intensity
+coefficients. Write I(mu) = c0 + c1 mu + c2 mu^2, so that
+c = (1 - u1 - u2, u1 + 2 u2, -u2). Then
+
+    F - 1 = (B @ c) / (N @ c),     N = (pi, 2 pi / 3, pi / 2)
+
+Here `B[..., j]` is the (negative, unnormalised) deficit of a star whose
+intensity is mu^j. It depends on the geometry alone. A sampler that
+marginalises or Gibbs-samples the limb darkening at each geometry needs
+`B` itself, and `ld_basis=True` returns it from **one** kernel launch:
+
+```python
+B = flux_dev_from_tau(tau, period, a, b, r, exp_time=29.4 / 60 / 24,
+                      integration="contact", n_gl=5, ld_basis=True)
+# (n, m, 3), or (m, 3) under the usual squeeze rule; u1/u2 not needed
+c = mx.array([1 - u1 - u2, u1 + 2 * u2, -u2])
+dev = (B @ c) / (math.pi * (1 - u1 / 3 - u2 / 6))   # == the scalar call
+```
+
+The kernel already holds the three Green's-basis deficits before it
+collapses them with (u1, u2), and exposure integration is linear, so it
+commutes with the basis. The VJP takes an (n, m, 3) cotangent and returns
+gradients in `tau`, `period`, `a`, `b` and `r`. Off by default: the scalar
+kernels are not edited, and with `ld_basis=False` every output and
+gradient is bit-identical to 0.6.1. The fp64 graph path takes the same
+keyword and meets the identity to ~1e-17. `flux_dev_metal(z, r,
+ld_basis=True)` does the same for the z-input kernel.
+
+Cost at 512 chains x 5,000 points (`benchmarks/bench_ld_basis.py`;
+each configuration runs in its own process):
+
+| contact rule, n_gl=5 | scalar | `ld_basis=True` | 3 scalar calls |
+|---|---:|---:|---:|
+| forward | 25.9 ms | 24.6 ms (**0.95x**) | 76.9 ms |
+| value+grad | 53.3 ms | 51.9 ms (**0.97x**) | 160.0 ms |
+
+That is the cost of one scalar call, to within noise, and 3.1x faster than
+forming three vertex laws one call at a time. For the instantaneous rule,
+where there is almost no arithmetic per output, the larger store shows:
+1.30x forward and 1.08x value+grad.
+
 ## Numerical notes worth knowing
 
 * Regime selection is `mx.where` masks with *both-branch sanitization*:

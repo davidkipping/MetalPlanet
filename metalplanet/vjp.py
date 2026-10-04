@@ -33,7 +33,7 @@ import mlx.core as mx
 
 from .solution import sn_dev_with_aux
 
-__all__ = ["flux_dev_analytic", "sn_partials"]
+__all__ = ["flux_dev_analytic", "ld_basis_analytic", "sn_partials"]
 
 _PI = math.pi
 
@@ -143,4 +143,38 @@ def _flux_dev_vjp(primals, cotangent, output):
         _unbroadcast(ct * dfdr, r.shape),
         _unbroadcast(ct * dfdu1, u1.shape),
         _unbroadcast(ct * dfdu2, u2.shape),
+    )
+
+
+@mx.custom_function
+def ld_basis_analytic(z: mx.array, r: mx.array) -> mx.array:
+    """The limb-darkening basis: (..., 3) flux deficits B_j for a star of
+    intensity mu^j, j = 0, 1, 2, unnormalised.
+
+    A quadratic law I = c0 + c1 mu + c2 mu^2, with
+    c = (1 - u1 - u2, u1 + 2 u2, -u2), gives
+
+        flux_dev(z, r, u1, u2) == (B @ c) / (N @ c),
+        N = (pi, 2 pi / 3, pi / 2)
+
+    exactly. In the Green's basis B_0 = s0, B_1 = s1 and
+    B_2 = s0 / 2 + s2 / 4 (the deviations, as flux_dev uses them).
+    """
+    s0d, s1d, s2d, _ = sn_dev_with_aux(z, r)
+    return mx.stack([s0d, s1d, 0.5 * s0d + 0.25 * s2d], axis=-1)
+
+
+@ld_basis_analytic.vjp
+def _ld_basis_vjp(primals, cotangent, output):
+    z, r = primals
+    ct = cotangent if isinstance(cotangent, mx.array) else cotangent[0]
+    _, _, _, aux = sn_dev_with_aux(z, r)
+    ds0dz, ds0dr, ds1dz, ds1dr, ds2dz, ds2dr = sn_partials(z, r, aux)
+    # ct . B = (ct0 + ct2/2) s0 + ct1 s1 + (ct2/4) s2
+    w0 = ct[..., 0] + 0.5 * ct[..., 2]
+    w1 = ct[..., 1]
+    w2 = 0.25 * ct[..., 2]
+    return (
+        _unbroadcast(w0 * ds0dz + w1 * ds1dz + w2 * ds2dz, z.shape),
+        _unbroadcast(w0 * ds0dr + w1 * ds1dr + w2 * ds2dr, r.shape),
     )

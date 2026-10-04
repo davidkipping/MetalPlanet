@@ -816,6 +816,153 @@ def _tau_src(body: str) -> str:
         "t1_of(tau0, hw_exp)", "(tau0 - hw_exp)")
 
 
+# ---------------------------------------------------------------------------
+# ld_basis: the limb-darkening basis instead of one limb-darkened curve
+#
+# A quadratic law is linear in its intensity coefficients: with
+# I(mu) = c0 + c1 mu + c2 mu^2,
+#
+#     F - 1 = (B @ c) / (N @ c),   N = (pi, 2 pi / 3, pi / 2),
+#
+# where B_j is the deficit of a star of intensity mu^j and depends only on
+# geometry. The photometric core already holds the Green's-basis deficits
+# s0d, s1d, s2d before collapsing them with gc / inv_norm, so the basis is
+#
+#     B_0 = s0d,   B_1 = s1d,   B_2 = s0d / 2 + s2d / 4
+#
+# (c = (1 - u1 - u2, u1 + 2 u2, -u2) reproduces gc exactly). Exposure
+# integration is linear, so it commutes with the basis and runs in
+# registers as before, on three accumulators instead of one.
+#
+# These are SEPARATE kernels with their own device functions: the scalar
+# kernels' source is untouched, so ld_basis=False is bit-identical by
+# construction rather than by test alone.
+# ---------------------------------------------------------------------------
+
+_PHOT_B_FN = """
+inline float3 mp_phot_b(float z, float r) {
+    if (z >= 1.0f + r) return float3(0.0f);
+    // the body ends by collapsing with (u1, u2); that tail is dead here
+    float u1 = 0.0f, u2 = 0.0f;
+PHOT_BODY
+    return float3(s0d, s1d, 0.5f * s0d + 0.25f * s2d);
+}
+
+// w . (s0d, s1d, s2d) and its z, r partials, for a cotangent ct on B
+// pre-contracted to w = (ct0 + ct2/2, ct1, ct2/4). Same signature as
+// mp_phot_d so the VJP body is shared; the u1/u2 slots are zero.
+inline float mp_phot_bd(float z, float r, float w0, float w1, float w2,
+                        thread float *dFdz, thread float *dFdr,
+                        thread float *dFdu1, thread float *dFdu2) {
+    *dFdu1 = 0.0f; *dFdu2 = 0.0f;
+    if (z >= 1.0f + r) {
+        *dFdz = 0.0f; *dFdr = 0.0f;
+        return 0.0f;
+    }
+    float u1 = 0.0f, u2 = 0.0f;
+PHOT_BODY
+PHOT_PARTIALS
+    *dFdz = w0 * ds0dz + w1 * ds1dz + w2 * ds2dz;
+    *dFdr = w0 * ds0dr + w1 * ds1dr + w2 * ds2dr;
+    return w0 * s0d + w1 * s1d + w2 * s2d;
+}
+"""
+
+
+def _phot_b_header() -> str:
+    return _subst(_PHOT_B_FN.replace("PHOT_BODY", _PHOT))
+
+
+def _swap(src: str, old: str, new: str) -> str:
+    """str.replace that refuses to silently match nothing."""
+    assert old in src, f"basis source derivation lost its anchor: {old!r}"
+    return src.replace(old, new)
+
+
+# the basis kernels take no limb darkening at all
+_TAU_HEAD_B = _swap(_TAU_HEAD,
+                    "    float u1  = u1in[y];\n    float u2  = u2in[y];\n", "")
+
+_TAU_FWD_B_SRC = _TAU_HEAD_B + """
+    float sphi, cphi, z;
+    float3 acc;
+    if (mode == MODE_NONE) {
+        z = mp_z_of_tau(tau0, per, av, bv, &sphi, &cphi);
+        acc = (cphi <= 0.0f) ? float3(0.0f) : mp_phot_b(z, r);
+    } else if (mode == MODE_SUPER) {
+        acc = float3(0.0f);
+        for (int j = 0; j < nsub; ++j) {
+            float frac = (nsub == 1) ? 0.5f
+                                     : (float)j / (float)(nsub - 1);
+            float tt = t1_of(tau0, hw_exp) + 2.0f * hw_exp * frac;
+            z = mp_z_of_tau(tt, per, av, bv, &sphi, &cphi);
+            acc += (cphi <= 0.0f) ? float3(0.0f) : mp_phot_b(z, r);
+        }
+        acc = acc / (float)nsub;
+    } else {
+""" + _TAU_EDGES + """
+        float3 A = float3(0.0f);
+        float S = 0.0f;
+        for (int iv = 0; iv < 5; ++iv) {
+            float lo = edge[iv], hi = edge[iv + 1];
+            float mid = 0.5f * (lo + hi), hw = 0.5f * (hi - lo);
+            for (int j = 0; j < ngl; ++j) {
+                float w = hw * wg[j];
+                float tt = mid + hw * xg[j];
+                z = mp_z_of_tau(tt, per, av, bv, &sphi, &cphi);
+                if (cphi > 0.0f) A += w * mp_phot_b(z, r);
+                S += w;
+            }
+        }
+        acc = (S > 0.0f) ? (A / S) : float3(0.0f);
+    }
+    out[3u * i]      = acc.x;
+    out[3u * i + 1u] = acc.y;
+    out[3u * i + 2u] = acc.z;
+"""
+
+# The backward pass is the scalar one with the cotangent moved inside the
+# core: ct . B is a scalar function of (z, r), so contracting first leaves
+# every line of the quadrature-derivative logic -- the Leibniz edge terms,
+# the A/S quotient rule -- exactly as it is, with ctv = 1. Derived by
+# substitution so there is one copy of that logic, not two.
+_TAU_VJP_B_SRC = _swap(_swap(_swap(
+    _TAU_VJP_SRC,
+    _TAU_HEAD, _TAU_HEAD_B),
+    "    float ctv = ct[i];\n",
+    "    float w0 = ct[3u * i] + 0.5f * ct[3u * i + 2u];\n"
+    "    float w1 = ct[3u * i + 1u];\n"
+    "    float w2 = 0.25f * ct[3u * i + 2u];\n"
+    "    float ctv = 1.0f;\n"),
+    "mp_phot_d(z, r, u1, u2, ", "mp_phot_bd(z, r, w0, w1, w2, ")
+
+# z-input basis kernels (flux_dev_metal(..., ld_basis=True)): the same two
+# device functions, one point per thread.
+_ZB_HEAD = """
+    uint x = thread_position_in_grid.x;
+    uint y = thread_position_in_grid.y;
+    if (x >= (uint)npts) return;
+    uint i = y * (uint)npts + x;
+    float z = fabs(zin[i]);
+    float r = rin[y];
+"""
+
+_FWD_B_SRC = _ZB_HEAD + """
+    float3 s = mp_phot_b(z, r);
+    out[3u * i]      = s.x;
+    out[3u * i + 1u] = s.y;
+    out[3u * i + 2u] = s.z;
+"""
+
+_VJP_B_SRC = _ZB_HEAD + """
+    float dz, dr, d1, d2;
+    mp_phot_bd(z, r, ct[3u * i] + 0.5f * ct[3u * i + 2u], ct[3u * i + 1u],
+               0.25f * ct[3u * i + 2u], &dz, &dr, &d1, &d2);
+    gz[i] = dz;
+    gr[i] = dr;
+"""
+
+
 _kernels: dict = {}
 _metal_ok: bool | None = None
 
@@ -932,6 +1079,28 @@ def _get_tau_kernels():
     return _kernels
 
 
+def _get_basis_kernels():
+    if "tau_fwd_b" not in _kernels:
+        hdr = _HEADER + _phot_header() + _phot_b_header()
+        ins = ["taui", "perin", "ain", "bin", "rin", "cs",
+               "xg", "wg", "expt", "mode", "ngl", "nsub", "npts"]
+        _kernels["tau_fwd_b"] = mx.fast.metal_kernel(
+            name="mp_tau_fwd_b", input_names=ins, output_names=["out"],
+            header=hdr, source=_tau_src(_TAU_FWD_B_SRC))
+        _kernels["tau_vjp_b"] = mx.fast.metal_kernel(
+            name="mp_tau_vjp_b", input_names=ins[:-1] + ["ct", "npts"],
+            output_names=["gtau", "gpar"],
+            header=hdr, source=_tau_src(_TAU_VJP_B_SRC))
+        _kernels["fwd_b"] = mx.fast.metal_kernel(
+            name="mp_flux_fwd_b", input_names=["zin", "rin", "npts"],
+            output_names=["out"], header=hdr, source=_subst(_FWD_B_SRC))
+        _kernels["vjp_b"] = mx.fast.metal_kernel(
+            name="mp_flux_vjp_b", input_names=["zin", "rin", "ct", "npts"],
+            output_names=["gz", "gr"], header=hdr,
+            source=_subst(_VJP_B_SRC))
+    return _kernels
+
+
 def metal_available() -> bool:
     """Probe: can the fused kernel actually run on this machine?"""
     global _metal_ok
@@ -994,10 +1163,68 @@ def _flux_dev_metal_vjp(primals, cotangent, output):
     return gz, mx.sum(gr, axis=1), mx.sum(gu1, axis=1), mx.sum(gu2, axis=1)
 
 
-def flux_dev_metal(z: mx.array, r, u1, u2) -> mx.array:
+@mx.custom_function
+def _ld_basis_metal_core(z2d: mx.array, r: mx.array) -> mx.array:
+    n, m = z2d.shape
+    k = _get_basis_kernels()["fwd_b"]
+    return k(inputs=[z2d, r, int(m)],
+             output_shapes=[(n, m, 3)], output_dtypes=[mx.float32],
+             grid=(m, n, 1), threadgroup=(256, 1, 1))[0]
+
+
+@_ld_basis_metal_core.vjp
+def _ld_basis_metal_vjp(primals, cotangent, output):
+    z2d, r = primals
+    ct = cotangent if isinstance(cotangent, mx.array) else cotangent[0]
+    n, m = z2d.shape
+    k = _get_basis_kernels()["vjp_b"]
+    gz, gr = k(inputs=[z2d, r, ct, int(m)],
+               output_shapes=[(n, m)] * 2, output_dtypes=[mx.float32] * 2,
+               grid=(m, n, 1), threadgroup=(256, 1, 1))
+    return gz, mx.sum(gr, axis=1)
+
+
+def _ld_basis_metal(z, r):
+    """flux_dev_metal(..., ld_basis=True): (..., 3) deficits, no LD."""
+    from .vjp import ld_basis_analytic
+    if not isinstance(z, mx.array):
+        z = mx.array(z)
+    if z.ndim not in (1, 2):
+        raise ValueError(f"z must be (m,) or (n, m) with ld_basis=True; "
+                         f"got {z.shape}")
+    # same chain layout on both paths: (n, m) points, r per chain
+    squeeze = z.ndim == 1
+    z2d = z[None, :] if squeeze else z
+    n_param = r.shape[0] if isinstance(r, mx.array) and r.ndim >= 1 else 1
+    n = max(z2d.shape[0], n_param)
+    rc = _canon_param(r, n, z.dtype).astype(z.dtype)
+    if z2d.shape[0] != n:
+        z2d = mx.broadcast_to(z2d, (n, z2d.shape[1]))
+    if (z.dtype == mx.float32 and _gpu_stream_active()
+            and metal_available()):
+        out = _ld_basis_metal_core(z2d, rc)
+    else:
+        out = ld_basis_analytic(z2d, rc[:, None])
+    return out[0] if squeeze and n == 1 else out
+
+
+def flux_dev_metal(z: mx.array, r, u1=None, u2=None, *,
+                   ld_basis: bool = False) -> mx.array:
     """F - 1 via the fused Metal kernels (fp32, GPU stream); silently
     falls back to flux_dev_analytic for fp64, CPU streams, unsupported
-    layouts, or machines where the kernel probe fails."""
+    layouts, or machines where the kernel probe fails.
+
+    With ``ld_basis=True`` it returns the limb-darkening basis instead:
+    shape ``z.shape + (3,)`` (with ``z`` broadcast over per-chain ``r``),
+    ``B[..., j]`` the unnormalised deficit for intensity mu^j, so that for
+    any quadratic law ``flux_dev_metal(z, r, u1, u2) == (B @ c) / (N @ c)``
+    with c = (1 - u1 - u2, u1 + 2 u2, -u2) and N = (pi, 2 pi/3, pi/2).
+    ``u1``/``u2`` are ignored there. See ``flux_dev_from_tau``.
+    """
+    if ld_basis:
+        return _ld_basis_metal(z, r)
+    if u1 is None or u2 is None:
+        raise ValueError("u1 and u2 are required unless ld_basis=True")
     if (not isinstance(z, mx.array) or z.dtype != mx.float32
             or z.ndim not in (1, 2) or not _gpu_stream_active()
             or not metal_available()):
@@ -1050,7 +1277,8 @@ def _contact_taus(r, a, b, period, n):
     return mx.stop_gradient(mx.concatenate(cols, axis=1))
 
 
-def _tau_graph(tau, period, a, b, r, u1, u2, exp_time, mode, n_gl, n_sub):
+def _tau_graph(tau, period, a, b, r, u1, u2, exp_time, mode, n_gl, n_sub,
+               basis=False):
     """The MLX-graph equivalent of the kernel, used for fp64, the CPU
     stream, and any machine where the kernel probe fails.
 
@@ -1059,13 +1287,14 @@ def _tau_graph(tau, period, a, b, r, u1, u2, exp_time, mode, n_gl, n_sub):
     the *same function*, including detaching the contacts, so that the two
     paths' gradients agree and not merely their values.
 
-    ``tau`` is (n, m); the parameters arrive as (n,), one per chain.
+    ``tau`` is (n, m); the parameters arrive as (n,), one per chain. With
+    ``basis`` the result is (n, m, 3) and ``u1``/``u2`` are unused.
     """
     from .exposure import contact_offsets, exposure_nodes
     from .orbit import separation_circular
-    from .vjp import flux_dev_analytic
+    from .vjp import flux_dev_analytic, ld_basis_analytic
 
-    pars = (period, a, b, r, u1, u2)
+    pars = (period, a, b, r) if basis else (period, a, b, r, u1, u2)
 
     def col(k):
         """Per-chain parameters with ``k`` trailing axes.
@@ -1079,9 +1308,16 @@ def _tau_graph(tau, period, a, b, r, u1, u2, exp_time, mode, n_gl, n_sub):
         return [mx.reshape(p, (-1,) + (1,) * k) for p in pars]
 
     def inst(tt, k):
+        if basis:
+            per, av, bv, rv = col(k)
+            return ld_basis_analytic(separation_circular(tt, per, bv, av),
+                                     rv)
         per, av, bv, rv, u1v, u2v = col(k)
         return flux_dev_analytic(separation_circular(tt, per, bv, av),
                                  rv, u1v, u2v)
+
+    # the basis carries a trailing axis of 3; the node axis sits before it
+    node_ax = -2 if basis else -1
 
     if mode == _INT_NONE or exp_time == 0.0:
         return inst(tau, 1)
@@ -1090,7 +1326,7 @@ def _tau_graph(tau, period, a, b, r, u1, u2, exp_time, mode, n_gl, n_sub):
         off = (np.linspace(-half, half, int(n_sub)) if n_sub > 1
                else np.zeros(1))
         nodes = tau[..., None] + mx.array(off, dtype=tau.dtype)
-        return mx.mean(inst(nodes, 2), axis=-1)
+        return mx.mean(inst(nodes, 2), axis=node_ax)
     # contact: exposure_nodes owns the branchless five-interval split.
     # tau is measured from each point's own mid-transit, so t0 = 0.
     #
@@ -1105,12 +1341,13 @@ def _tau_graph(tau, period, a, b, r, u1, u2, exp_time, mode, n_gl, n_sub):
     cs = tuple(mx.stop_gradient(c) for c in contact_offsets(r1, a1, b1))
     T, W = exposure_nodes(tau, tau * 0.0, mx.stop_gradient(per1),
                           exp_time, cs, int(n_gl), dtype=tau.dtype)
-    return mx.sum(inst(T, 2) * W, axis=-1)
+    return mx.sum(inst(T, 2) * (W[..., None] if basis else W), axis=node_ax)
 
 
-def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1, u2, *,
+def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1=None, u2=None, *,
                       exp_time: float = 0.0, integration: str = "contact",
-                      n_gl: int = 5, n_sub: int = 1) -> mx.array:
+                      n_gl: int = 5, n_sub: int = 1,
+                      ld_basis: bool = False) -> mx.array:
     """F - 1 from time-since-mid-transit, with the exposure integrated
     *inside* the kernel.
 
@@ -1146,15 +1383,30 @@ def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1, u2, *,
         n_gl: Gauss-Legendre nodes per sub-interval. The window always has
             five sub-intervals, so the cost is 5 * n_gl evaluations.
         n_sub: number of nodes for ``"supersample"``.
+        ld_basis: return the limb-darkening *basis* instead of one
+            limb-darkened curve (off by default; see below). ``u1``/``u2``
+            are then ignored and may be omitted.
 
     Returns:
         (n, m) -- or (m,) for 1-D ``tau`` and no per-chain parameters -- of
         F - 1, exposure-averaged. Exactly 0 out of transit, as
         ``flux_dev_metal`` is.
 
-    Gradients flow in ``tau`` and in all six parameters. fp64, the CPU
-    stream, and machines without a usable Metal device take the MLX graph
-    path, which computes the same function.
+        With ``ld_basis=True``: (n, m, 3) -- or (m, 3) under the same rule.
+        ``B[..., j]`` is the exposure-averaged, *unnormalised* flux deficit
+        of a star whose intensity is mu^j. It depends on geometry only, and
+        for any quadratic law, with c = (1 - u1 - u2, u1 + 2 u2, -u2) and
+        N = (pi, 2 pi / 3, pi / 2),
+
+            flux_dev_from_tau(..., u1, u2) == (B @ c) / (N @ c)
+
+        -- so a caller treating limb darkening as a linear block gets every
+        law from one kernel launch. Costs about one scalar call.
+
+    Gradients flow in ``tau`` and in all six parameters (five with
+    ``ld_basis``, which takes a (..., 3) cotangent). fp64, the CPU stream,
+    and machines without a usable Metal device take the MLX graph path,
+    which computes the same function.
     """
     mode = _INT_MODES.get(integration)
     if mode is None:
@@ -1166,13 +1418,15 @@ def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1, u2, *,
         raise ValueError("exp_time must be >= 0")
     if float(exp_time) == 0.0:
         mode = _INT_NONE
+    if not ld_basis and (u1 is None or u2 is None):
+        raise ValueError("u1 and u2 are required unless ld_basis=True")
     return _flux_dev_from_tau_impl(tau, period, a, b, r, u1, u2,
                                    float(exp_time), mode, int(n_gl),
-                                   int(n_sub))
+                                   int(n_sub), bool(ld_basis))
 
 
 def _flux_dev_from_tau_impl(tau, period, a, b, r, u1, u2, exp_time, mode,
-                            n_gl, n_sub):
+                            n_gl, n_sub, basis=False):
     if not isinstance(tau, mx.array):
         tau = mx.array(tau)
     if tau.ndim not in (1, 2):
@@ -1185,10 +1439,12 @@ def _flux_dev_from_tau_impl(tau, period, a, b, r, u1, u2, exp_time, mode,
         # to pre-empt; TransitModel does the same (api.py: _stream).
         with mx.stream(mx.cpu):
             return _flux_dev_from_tau_impl(tau, period, a, b, r, u1, u2,
-                                           exp_time, mode, n_gl, n_sub)
+                                           exp_time, mode, n_gl, n_sub,
+                                           basis)
     squeeze = tau.ndim == 1
     tau2d = tau[None, :] if squeeze else tau
-    params = (period, a, b, r, u1, u2)
+    # ld_basis ignores u1/u2 entirely -- including their chain count
+    params = (period, a, b, r) if basis else (period, a, b, r, u1, u2)
     n_param = max((p.shape[0] if isinstance(p, mx.array) and p.ndim >= 1
                    else 1) for p in params)
     n = max(tau2d.shape[0], n_param)
@@ -1201,7 +1457,11 @@ def _flux_dev_from_tau_impl(tau, period, a, b, r, u1, u2, exp_time, mode,
 
     if (tau2d.dtype == mx.float32 and _gpu_stream_active()
             and metal_available()):
-        out = _make_tau_core(exp_time, mode, n_gl, n_sub)(tau2d, *pc)
+        make = _make_tau_basis_core if basis else _make_tau_core
+        out = make(exp_time, mode, n_gl, n_sub)(tau2d, *pc)
+    elif basis:
+        out = _tau_graph(tau2d, *pc, None, None, exp_time, mode, n_gl,
+                         n_sub, basis=True)
     else:
         # the graph path takes the same (n,) parameters as the kernel and
         # adds the trailing axes its own node grid needs
@@ -1252,6 +1512,51 @@ def _make_tau_core(exp_time, mode, n_gl, n_sub):
             grid=(m, n, 1), threadgroup=(256, 1, 1))
         g = mx.sum(gpar, axis=2)
         return (gtau, g[:, 0], g[:, 1], g[:, 2], g[:, 3], g[:, 4], g[:, 5])
+
+    _tau_cores[key] = core
+    return core
+
+
+def _make_tau_basis_core(exp_time, mode, n_gl, n_sub):
+    """_make_tau_core for ld_basis: (tau, period, a, b, r) -> (n, m, 3)."""
+    key = ("basis", float(exp_time), int(mode), int(n_gl), int(n_sub))
+    if key in _tau_cores:
+        return _tau_cores[key]
+    from .exposure import gauss_legendre
+    xg_np, wg_np = gauss_legendre(n_gl)
+
+    def _static(dtype):
+        return mx.array(xg_np, dtype=dtype), mx.array(wg_np, dtype=dtype)
+
+    @mx.custom_function
+    def core(tau2d, period, a, b, r):
+        n, m = tau2d.shape
+        xg, wg = _static(tau2d.dtype)
+        cs = _contact_taus(r, a, b, period, n)
+        k = _get_basis_kernels()["tau_fwd_b"]
+        return k(inputs=[tau2d, period, a, b, r, cs, xg, wg,
+                         exp_time, mode, n_gl, n_sub, int(m)],
+                 output_shapes=[(n, m, 3)], output_dtypes=[mx.float32],
+                 grid=(m, n, 1), threadgroup=(256, 1, 1))[0]
+
+    @core.vjp
+    def core_vjp(primals, cotangent, output):
+        tau2d, period, a, b, r = primals
+        ct = cotangent if isinstance(cotangent, mx.array) else cotangent[0]
+        n, m = tau2d.shape
+        cols = (m + 31) // 32
+        xg, wg = _static(tau2d.dtype)
+        cs = _contact_taus(r, a, b, period, n)
+        k = _get_basis_kernels()["tau_vjp_b"]
+        gtau, gpar = k(
+            inputs=[tau2d, period, a, b, r, cs, xg, wg, exp_time,
+                    mode, n_gl, n_sub, ct, int(m)],
+            output_shapes=[(n, m), (n, NTAUPAR, cols)],
+            output_dtypes=[mx.float32] * 2, init_value=0.0,
+            grid=(m, n, 1), threadgroup=(256, 1, 1))
+        # gpar shares the scalar layout; its u1/u2 slots are zero here
+        g = mx.sum(gpar[:, :4], axis=2)
+        return (gtau, g[:, 0], g[:, 1], g[:, 2], g[:, 3])
 
     _tau_cores[key] = core
     return core

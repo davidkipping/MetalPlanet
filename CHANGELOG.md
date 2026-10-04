@@ -28,6 +28,35 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
   broadcast correctly. 455 tests green.
 
 ### Added
+- **`ld_basis=True` on `flux_dev_from_tau` (and `flux_dev_metal`)**: off by
+  default. Requested by SquishierPlanet
+  (`../SquishierPlanet/docs/upstream/metalplanet_ldbasis_prompt.md`),
+  whose collapsed-limb-darkening target treats (u1, u2) as a linear block.
+  It returns the (n, m, 3) basis `B`, where `B[..., j]` is the
+  exposure-integrated, unnormalised deficit for intensity mu^j. For any
+  quadratic law, with c = (1 - u1 - u2, u1 + 2 u2, -u2) and
+  N = (pi, 2 pi/3, pi/2), the scalar call equals `(B @ c) / (N @ c)`.
+  The kernel already held the Green's-basis deficits s0d, s1d, s2d, so
+  the basis is B = (s0d, s1d, s0d/2 + s2d/4) stored where one collapsed
+  number used to be. The VJP takes an (n, m, 3) cotangent and returns
+  gradients in tau, period, a, b and r. It contracts the cotangent into
+  the core first (ct . B is a scalar function of z, r), so the
+  quadrature-derivative logic is shared with the scalar VJP rather than
+  copied. The fp64 graph path (`vjp.ld_basis_analytic`, which has an
+  analytic VJP) takes the same keyword.
+
+  Measured: identity to <= 1.2e-8 (fp32 kernel) and ~1e-17 (fp64 graph),
+  including grazing geometry and r = 0.3, over the whole q-box. Cost at
+  512 x 5,000, contact, n_gl = 5: 0.95x forward and 0.97x value+grad
+  relative to one scalar call, against 3x for the three calls it
+  replaces. `ld_basis=False` is bit-identical to 0.6.1. The scalar
+  kernel sources are byte-for-byte unchanged (the basis kernels are
+  separate), and outputs and every gradient were compared bitwise against
+  the previous commit on both paths. `u1`/`u2` are now optional keywords,
+  required only when `ld_basis=False`. 84 tests
+  (`tests/test_ld_basis.py`), benchmark `benchmarks/bench_ld_basis.py`.
+  538 tests green.
+
 - **`flux_dev_from_tau`** — a `tau`-input entry point with the exposure
   integration *inside* the kernel, requested by
   [turin](../turin/docs/upstream/metalplanet_prompt.md) (Kepler/TESS
