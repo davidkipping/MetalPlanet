@@ -170,6 +170,75 @@ def test_fp32_gradients_match_fp64(mode, ecc, ecc_as):
         assert abs(a - b) <= 2e-3 * max(abs(b), 1e-3 * max(map(abs, g64))), k
 
 
+def test_scalar_value_helper():
+    """Pins the one MLX dependency behind readable-vs-traced: a scalar
+    reads eagerly and under mx.grad, is None under compile and vmap, and
+    a vector is a caller error rather than 'traced'."""
+    from metalplanet.api import _scalar_value
+    assert _scalar_value(mx.array(0.3), "e") == pytest.approx(0.3)
+    seen = {}
+    mx.grad(lambda e: (seen.__setitem__("g", _scalar_value(e, "e")),
+                       mx.sum(e))[1])(mx.array(0.3))
+    assert seen["g"] == pytest.approx(0.3)
+    mx.compile(lambda e: (seen.__setitem__("c", _scalar_value(e, "e")),
+                          e)[1])(mx.array(0.3))
+    mx.vmap(lambda e: (seen.__setitem__("v", _scalar_value(e, "e")),
+                       e)[1])(mx.array([0.3]))
+    assert seen["c"] is None and seen["v"] is None
+    with pytest.raises(ValueError, match="must be a scalar"):
+        _scalar_value(mx.array([0.3, 0.4]), "e")
+
+
+def test_vector_eccentricity_is_rejected():
+    """A (601,) ecc used to run, one eccentricity per time sample."""
+    m = metalplanet.TransitModel(params(), T)
+    with mx.stream(mx.cpu):
+        with pytest.raises(ValueError, match="ecc must be a scalar"):
+            m.light_curve_mx(params(ecc=mx.full((T.size,), 0.3,
+                                                dtype=mx.float64)))
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+def test_fp64_ecc_that_rounds_to_one_in_fp32_is_rejected():
+    """The check sees the value the graph sees: 1 - 1e-9 passes in fp64
+    but is exactly 1.0 in fp32, which used to run to a flat curve."""
+    m = metalplanet.TransitModel(params(), T, dtype=mx.float32)
+    with pytest.raises(ValueError, match="eccentricity"):
+        m.light_curve_mx(params(ecc=mx.array(1 - 1e-9, dtype=mx.float64)))
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+def test_ew_route_is_as_accurate_as_the_kh_route_in_fp32():
+    """The (e, w) and (k, h) graphs are the same function (4e-16 apart in
+    fp64) computed along different fp32 paths: each sits ~1.8e-7 from
+    fp64 truth and they differ from each other by ~2.4e-7. That is path
+    rounding, not a fold error -- a Python w (folded on the host) and an
+    array w (in-graph) give the identical (e, w) result."""
+    m32 = metalplanet.TransitModel(params(), T, dtype=mx.float32)
+    truth = metalplanet.TransitModel(params(), T).light_curve(params())
+    kh = m32.light_curve(params())
+    ew = np.asarray(m32.light_curve_mx(params(ecc=mx.array(0.3))),
+                    dtype=np.float64)
+    ew_w = np.asarray(m32.light_curve_mx(params(ecc=mx.array(0.3),
+                                                w=mx.array(63.0))),
+                      dtype=np.float64)
+    assert np.abs(ew - truth).max() <= 1.5 * np.abs(kh - truth).max()
+    assert np.array_equal(ew, ew_w)
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+def test_contact_mode_compiles_once_across_streams():
+    """The kernel never serves the contact rule, so its cache key must not
+    split on the stream (0.9.2 compiled the same graph twice)."""
+    m = metalplanet.TransitModel(params(), T, dtype=mx.float32,
+                                 exp_time=EXP, integration="contact")
+    assert not m._kernel_usable()
+    m.light_curve(params())
+    with mx.stream(mx.cpu):
+        mx.eval(m.light_curve_mx(params(rp=mx.array(0.1))))
+    assert list(m._compiled) == [(False, False)]
+
+
 @pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
 @pytest.mark.parametrize("ecc", [0.0, 0.3], ids=["circular", "e0.3"])
 def test_fp32_python_ecc_runs_the_fused_kernel_and_is_bitwise(ecc):

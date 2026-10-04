@@ -5,6 +5,45 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.9.3] — 2026-10-04
+
+Fixes from a third code review (of 0.9.2).
+
+### Fixed
+- **A vector-valued `ecc` ran unvalidated.** The readable-vs-traced test
+  caught `ValueError`, and MLX raises that same type for "cannot convert
+  a multi-element array", so `ecc = mx.full((601,), 0.3)` returned a
+  (601,) curve with each time sample at its own eccentricity. `ecc` must
+  now be a scalar (a clear `ValueError` otherwise). The readable-vs-traced
+  decision lives in one named helper, `_scalar_value`, which checks the
+  shape first and matches MLX's traced-eval error explicitly; a test pins
+  that dependency.
+- **An fp64 `ecc` just below 1 reached an fp32 graph as exactly 1.**
+  The range check read the fp64 host value; the graph received the fp32
+  cast, so `ecc = 1 - 1e-9` passed and ran to a flat curve. The check now
+  sees the value the graph sees.
+- **The kernel decision is no longer in the cache key where it cannot
+  matter.** `_kernel_usable()` is False for `integration="contact"` (the
+  kernel never served that path), so an fp32 contact model called on
+  both streams compiles its graph once, not twice.
+- **Docstring overclaim.** `light_curve_mx` matches `light_curve` bit for
+  bit when the array fields are among t0, per, rp, fp and u, which enter
+  the graph as they are; an array a, inc or w is combined in-graph in
+  the model dtype, ~1 ulp from the host fold on fp32. The docstring now
+  says exactly that.
+- A Python `w` on the (e, w) route is folded to radians on the host in
+  fp64 again (0.9.2 did it in-graph), matching the other Python fields.
+  Note the review that flagged it attributed the (e, w) route's 2.4e-7
+  fp32 difference from `light_curve` to this; it is not. The two routes
+  are the same function (4e-16 apart in fp64) computed along different
+  fp32 paths, each ~1.8e-7 from fp64 truth, and a Python and an array
+  `w` give the identical (e, w) result. A test now pins that.
+
+Not changed: an array `ecc` is read (and so evaluated) under `mx.grad`
+to validate it, as 0.9.2 documents. 5 new tests; 741 green.
+`light_curve`, `light_curves` and `flux_dev_from_tau` remain bitwise
+identical to 0.8.2 (296 arrays).
+
 ## [0.9.2] — 2026-10-04
 
 Fixes from two code reviews of 0.9.1.

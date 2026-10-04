@@ -107,6 +107,27 @@ def _ld_coeffs(params, conv=float) -> tuple[float, float]:
         "outside the ALFM19 formulation.")
 
 
+def _scalar_value(x, name):
+    """The Python float of a scalar mx.array, or None if it is traced.
+
+    Under mx.compile / mx.vmap an array cannot be read -- MLX raises on
+    the attempt -- while eagerly, and under mx.grad (whose inputs are plain
+    arrays), it can; the read is free for a leaf and otherwise evaluates
+    the upstream graph. A multi-element array also fails to convert, with
+    the same exception type, so the shape is checked first: that case is a
+    caller error, not a trace. The MLX dependency is this one place
+    (pinned by test_light_curve_mx.test_scalar_value_helper).
+    """
+    if x.size != 1:
+        raise ValueError(f"{name} must be a scalar; got shape {x.shape}")
+    try:
+        return float(x)
+    except ValueError as err:
+        if "function transformations" in str(err):
+            return None
+        raise
+
+
 class _nullcontext:
     def __enter__(self):
         return None
@@ -252,10 +273,15 @@ class TransitModel:
     def _kernel_usable(self) -> bool:
         """The fused kernel serves the fp32 GPU *primary*-transit path for
         both circular and eccentric orbits; fp64, CPU streams, secondary
-        eclipses and polynomial limb darkening keep the graph."""
+        eclipses, polynomial limb darkening and the contact rule keep the
+        graph. This answer is part of the compiled-graph cache key, so it
+        must be False wherever the graph would be the same either way.
+        """
         if not self.use_metal or self.transittype != "primary":
             return False
         if self._n_poly:            # the kernel is quadratic-only
+            return False
+        if self.integration == "contact":   # its own node grid: graph-only
             return False
         if self.dtype != mx.float32:
             return False
@@ -439,8 +465,10 @@ class TransitModel:
                     return x.astype(dt)
             return mx.array(float(x), dtype=dt)
 
-        def rad(x):                       # degrees -> radians, in-graph
-            return cast(x) * (math.pi / 180.0)
+        def rad(x):                       # degrees -> radians
+            if is_arr(x):
+                return cast(x) * (math.pi / 180.0)
+            return cast(math.radians(float(x)))   # on the host, in fp64
 
         t0 = params.t0
         if is_arr(t0):
@@ -473,32 +501,24 @@ class TransitModel:
             ld = _ld_coeffs(params, conv=cast)
 
         ecc = params.ecc
-        ev = None
         if is_arr(ecc):
-            # Concrete (eager, or under mx.grad -- its inputs are plain
-            # arrays) reads as a float and is validated like a number; the
-            # read is free when ecc is a leaf and otherwise evaluates its
-            # upstream graph. Under mx.compile / mx.vmap it is traced and
-            # cannot be read: then an out-of-range e makes the output NaN
-            # -- and, through the factor, every gradient -- loud where a
-            # ValueError cannot be raised.
-            try:
-                ev = float(ecc)
-            except ValueError:
-                pass
-        else:
-            ev = float(ecc)
-        if ev is not None:
-            _check_ecc(ev)
-
-        if is_arr(ecc):
+            # Validate the value the GRAPH will see: an fp64 e just below
+            # 1 can round to exactly 1 in fp32. Readable (eagerly, under
+            # mx.grad) it raises like a number; traced (mx.compile,
+            # mx.vmap) it cannot, and an out-of-range e instead makes the
+            # output NaN -- and, through the factor, every gradient.
             e = cast(ecc)
+            ev = _scalar_value(e, "ecc")
+            if ev is not None:
+                _check_ecc(ev)
             f = self._get_compiled(False, ew=True)(
                 t0_off, per, a, e, rad(params.w), ci, rp, *ld, fp)
             if ev is None:
                 ok = mx.logical_and(e >= 0.0, e < 1.0)
                 f = f * mx.where(ok, 1.0, float("nan")).astype(dt)
             return f
+        ev = float(ecc)
+        _check_ecc(ev)
         if ev == 0.0:                     # circular: w is irrelevant
             b = (a * ci if is_arr(params.a) or is_arr(inc)
                  else cast(float(params.a) * ci_py))
@@ -689,9 +709,13 @@ class TransitModel:
         Any ``TransitParams`` field may be an ``mx.array`` scalar (t0, per,
         rp, a, inc, ecc, w, fp, and ``u`` or its entries), and gradients
         flow to every such field. Python numbers stay constants, folded on
-        the host exactly as ``light_curve`` folds them, so the result is
-        ``light_curve``'s bit for bit -- whichever fields are arrays, as
-        long as ``ecc`` is not (see ``_model_eval``).
+        the host exactly as ``light_curve`` folds them. With ``ecc`` a
+        Python number the result is ``light_curve``'s bit for bit when the
+        arrays are among t0, per, rp, fp and u, which enter the graph as
+        they are; an array ``a``, ``inc`` or ``w`` is combined in-graph in
+        the model dtype (b = a cos i, (k, h) = sqrt(e) (cos w, sin w)),
+        which on an fp32 model differs from the host fold by ~1 ulp
+        (see ``_model_eval``).
 
         Returns the flux at the times given at construction, exposure-
         averaged for ``integration="contact"``. With ``supersample_factor``
