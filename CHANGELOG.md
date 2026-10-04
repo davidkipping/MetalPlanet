@@ -5,6 +5,8 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-03
+
 ### Fixed
 - **`flux_dev_from_tau`'s graph path could not batch chains.** Reported by
   turin, who hit it on the fp64 reference path and worked around it by
