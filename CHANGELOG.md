@@ -5,6 +5,43 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.9.7] — 2026-10-04
+
+Fixes from a seventh code review (of 0.9.6).
+
+### Fixed
+- **0.9.6 broke the array-valued `light_curves` form with a per-set `u`
+  (regression).** `light_curves(params)` with array attributes takes a
+  per-set `u` of shape (n_sets, N) (README), and 0.9.6 routed it through
+  the single-set normaliser, which demands 1-D: it raised
+  `u must be a 1-D vector; got shape (3, 2)`. On 0.9.5 it ran and matched
+  the loop to 4e-16. The bitwise corpus never held that case, which is
+  why it passed. That branch now normalises `u` to (n_sets, N) itself
+  (`_u_vector(..., sets=True)`) and compares N -- not the number of sets,
+  which 0.9.5 had counted, wrongly, for a polynomial law -- against the
+  model order; a mismatched set count or a 3-D `u` is a clear error.
+- **A mixed `u` list no longer borrows a sibling's dtype.** 0.9.6
+  converted the Python entries of a list holding an `mx.array` scalar to
+  that scalar's dtype: `[mx.array(1), 0.4]` turned 0.4 into int 0 (flux
+  2e-3 off, no error), and an fp32 entry rounded its neighbours before
+  the model cast. Each entry is now cast on its own, to the model dtype,
+  as 0.9.5 did. A nested non-mx entry beside an mx one gets the shape
+  error rather than an opaque `TypeError`.
+- **`u` is normalised once per entry point.** `_check_law` returns the
+  normalised vector and `light_curve`, `light_curve_mx` and the
+  sequence form of `light_curves` thread it through; 0.9.6 normalised two
+  or three times per call on the sampler-facing path.
+- `TransitModel.__init__` derives the polynomial order through the same
+  normaliser, so a wrong-shaped `u` is rejected at construction too.
+- A test compared `f is m.light_curves`, which is always False (a bound
+  method is a fresh object per access), so the `light_curves` branch it
+  meant to cover was never exercised. It compares by name.
+
+4 new tests, including the array-valued per-set `u` case for quadratic,
+polynomial and linear laws against the looped result; 809 green.
+`light_curve`, `light_curves` and `flux_dev_from_tau` remain bitwise
+identical to 0.8.2 (296 arrays).
+
 ## [0.9.6] — 2026-10-04
 
 Fixes from a sixth code review (of 0.9.5).

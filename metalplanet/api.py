@@ -78,44 +78,62 @@ class TransitParams:
         self.t_secondary = None   # unused; secondary timing is computed
 
 
-def _u_vector(u):
-    """``params.u`` as ONE 1-D vector, whatever it arrived as.
+def _u_vector(u, sets=False):
+    """``params.u`` as ONE 1-D sequence of coefficients, whatever it
+    arrived as -- or, with ``sets``, as a (n_sets, N) float64 array.
 
     A list or tuple of numbers, a numpy array and an mx.array all come
     through here, as does a list holding mx.array scalars (the way to
     differentiate one coefficient). The result is a float64 numpy vector
-    for host input and an mx.array vector otherwise, and anything that is
-    not exactly one axis raises: a (n, 1) column -- a loadtxt slice, or a
-    nested list -- used to pass the coefficient *count* and then run
-    flux_dev_poly's batched branch as a wrong-order model, and a 0-d
-    mx.array died in list() with an opaque IndexError. One container rule
-    in one place is what makes "every container" true.
+    for host input, the mx.array itself for a whole-array u, and for the
+    mixed list the list of its validated scalars -- each converted to the
+    model dtype later, on its own, so no entry borrows a sibling's dtype
+    (an int mx scalar used to truncate its Python neighbours to 0).
+    Anything that is not exactly one axis raises: a (n, 1) column -- a
+    loadtxt slice, or a nested list -- used to pass the coefficient
+    *count* and then run flux_dev_poly's batched branch as a wrong-order
+    model, and a 0-d mx.array died in list() with an opaque IndexError.
+    One container rule in one place is what makes "every container" true.
+
+    ``sets`` is the array-valued ``light_curves`` form, whose u may be
+    (N,) for all sets or (n_sets, N) per set; it is returned 2-D.
     """
     if u is None:
-        return np.zeros(0)
-    if isinstance(u, mx.array):
+        v = np.zeros((1, 0) if sets else 0)
+    elif isinstance(u, mx.array):
         v = u
     elif (isinstance(u, (list, tuple))
           and any(isinstance(x, mx.array) for x in u)):
         for x in u:
             if isinstance(x, mx.array):
                 _need_scalar(x, "u")
-        dt = next(x.dtype for x in u if isinstance(x, mx.array))
-        v = mx.stack([x if isinstance(x, mx.array)
-                      else mx.array(float(x), dtype=dt) for x in u])
+            elif np.ndim(x) != 0:
+                raise ValueError("u must be a 1-D vector; got a nested "
+                                 f"entry of shape {np.shape(x)}")
+        v = list(u)
     else:
         v = np.asarray(u, dtype=np.float64)
-    if v.ndim != 1:
-        raise ValueError(f"u must be a 1-D vector; got shape {tuple(v.shape)}")
+    if sets:
+        v = np.asarray(v, dtype=np.float64)
+        if v.ndim == 1:
+            v = v[None, :]
+        if v.ndim != 2:
+            raise ValueError("u must be (N,) or (n_sets, N) here; got shape "
+                             f"{tuple(v.shape)}")
+        return v
+    if np.ndim(v) != 1:
+        raise ValueError(f"u must be a 1-D vector; got shape {tuple(np.shape(v))}")
     return v
 
 
-def _ld_coeffs(params, conv=float) -> tuple[float, float]:
+def _ld_coeffs(params, conv=float, u=None) -> tuple[float, float]:
     """(u1, u2) for the quadratic core, validated. ``conv`` maps each
     value: float for the traced-scalar paths, a graph-preserving cast for
-    light_curve_mx's differentiable one."""
+    light_curve_mx's differentiable one. ``u`` is the already-normalised
+    vector when the caller has it."""
     law = params.limb_dark
-    u = _u_vector(params.u)
+    if u is None:
+        u = _u_vector(params.u)
     if law == "uniform":
         if len(u) != 0:
             raise ValueError("uniform limb darkening takes no coefficients")
@@ -249,7 +267,7 @@ class TransitModel:
         self.n_gl = int(n_gl)
         self.transittype = transittype
         self.limb_dark = params.limb_dark
-        self._n_poly = (len(list(params.u))
+        self._n_poly = (len(_u_vector(params.u))
                         if params.limb_dark == "polynomial" else 0)
         self.dtype = mx.float64 if dtype is None else dtype
         self._stream = mx.cpu if self.dtype == mx.float64 else None
@@ -475,7 +493,7 @@ class TransitModel:
         self._compiled[key] = fn
         return fn
 
-    def _model_eval(self, params) -> mx.array:
+    def _model_eval(self, params, uv) -> mx.array:
         """One parameter set -> flux, through the compiled graphs. The one
         path behind light_curve and light_curve_mx.
 
@@ -495,9 +513,9 @@ class TransitModel:
             return isinstance(x, mx.array)
 
         # Shapes first, once, before any routing: every per-set field is
-        # one number (u is a flat vector, normalised by _u_vector in
-        # _check_law, which runs before this). A route that never reads a
-        # field (w on a circular orbit) still rejects a bad one.
+        # one number (``uv`` is u already normalised by _check_law). A
+        # route that never reads a field (w on a circular orbit) still
+        # rejects a bad one.
         for name in self._BATCH_KEYS:
             x = getattr(params, name)
             if is_arr(x):
@@ -511,6 +529,8 @@ class TransitModel:
                     return x.astype(dt)
             if isinstance(x, np.ndarray):          # a host u vector
                 return mx.array(x, dtype=dt)
+            if isinstance(x, list):                # mixed u: entry by entry
+                return mx.stack([cast(y) for y in x])
             return mx.array(float(x), dtype=dt)
 
         def rad(x):                       # degrees -> radians
@@ -536,9 +556,9 @@ class TransitModel:
         per, a, rp = cast(params.per), cast(params.a), cast(params.rp)
 
         if self._n_poly:
-            ld = (cast(_u_vector(params.u)),)
+            ld = (cast(uv),)
         else:
-            ld = _ld_coeffs(params, conv=cast)
+            ld = _ld_coeffs(params, conv=cast, u=uv)
 
         ecc = params.ecc
         if is_arr(ecc):
@@ -575,31 +595,35 @@ class TransitModel:
 
     # -- batman-compatible surface ----------------------------------------
 
-    def _check_law(self, params):
+    def _check_law(self, params, sets=False):
         """The limb-darkening law AND its order are fixed per model: the
         order is baked into the compiled graph (and into the g_n affine
         map), so a changed count would be silently truncated by the zip in
-        flux_dev_poly rather than raising."""
+        flux_dev_poly rather than raising. Returns the normalised u
+        (_u_vector: shape judged before the count), so each entry point
+        normalises once and threads it through."""
         if params.limb_dark != self.limb_dark:
             raise ValueError(
                 "limb-darkening law changed since model construction; "
                 "build a new TransitModel")
-        n_u = len(_u_vector(params.u))       # shape first, then the count
+        u = _u_vector(params.u, sets=sets)
+        n_u = u.shape[-1] if sets else len(u)
         if self._n_poly and n_u != self._n_poly:
             raise ValueError(
                 f"polynomial limb-darkening order changed since model "
                 f"construction ({self._n_poly} -> {n_u} coefficients); "
                 f"build a new TransitModel")
+        return u
 
     def light_curve(self, params) -> np.ndarray:
         """Model flux at the times given at construction (numpy array)."""
-        self._check_law(params)
+        uv = self._check_law(params)
         if self._stream is not None:
             with mx.stream(self._stream):
-                f = self._model_eval(params)
+                f = self._model_eval(params, uv)
                 out = np.array(f, dtype=np.float64)
         else:
-            out = np.array(self._model_eval(params), dtype=np.float64)
+            out = np.array(self._model_eval(params, uv), dtype=np.float64)
         if (self.supersample_factor > 1
                 and self.integration == "supersample"):
             out = out.reshape(self.t.size,
@@ -623,18 +647,19 @@ class TransitModel:
                 vals = [getattr(p, k) for p in seq]
                 cols[k] = np.array([0.0 if v is None else float(v)
                                     for v in vals], dtype=np.float64)
+            rows = []
             for p in seq:
                 # the same validation the single-set path performs: an
                 # unchecked set returns a plausible but wrong curve, or a
                 # silent NaN row that a sampler reads as -inf
-                self._check_law(p)
-                _ld_coeffs(p)
-            u = np.array([np.asarray(_u_vector(p.u), dtype=np.float64)
-                          for p in seq])
+                uv = self._check_law(p)
+                _ld_coeffs(p, u=uv)
+                rows.append([float(x) for x in uv])
+            u = np.array(rows, dtype=np.float64).reshape(len(seq), -1)
             _check_ecc(cols["ecc"])
             return cols, u
         p = params_seq                       # array-valued TransitParams
-        self._check_law(p)
+        u = self._check_law(p, sets=True)    # (1 or n_sets, N)
         # any subset of the attributes may be arrays; the batch size is
         # the longest of them (scalars broadcast against it)
         sizes = set()
@@ -655,9 +680,10 @@ class TransitModel:
             cols[k] = np.broadcast_to(
                 np.atleast_1d(np.asarray(v, dtype=np.float64)),
                 (n,)).astype(np.float64)
-        u = np.asarray(p.u, dtype=np.float64)
-        u = np.broadcast_to(np.atleast_2d(u), (n, u.shape[-1])) \
-            if u.size else np.zeros((n, 0))
+        if u.shape[0] not in (1, n):
+            raise ValueError(f"inconsistent parameter-array lengths: u has "
+                             f"{u.shape[0]} sets, the other fields {n}")
+        u = np.broadcast_to(u, (n, u.shape[1]))
         _check_ecc(cols["ecc"])
         return cols, np.ascontiguousarray(u)
 
@@ -800,9 +826,9 @@ class TransitModel:
         it must stay on the CPU too: wrap your own ops (and ``mx.grad``) in
         ``with mx.stream(mx.cpu):``.
         """
-        self._check_law(params)
+        uv = self._check_law(params)
         ctx = (mx.stream(self._stream) if self._stream is not None
                else _nullcontext())
         with ctx:
-            return self._model_eval(params)
+            return self._model_eval(params, uv)
 

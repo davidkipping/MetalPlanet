@@ -241,7 +241,13 @@ def test_u_must_be_a_flat_vector_in_every_container(law, u, container):
                 with pytest.raises(ValueError,
                                    match="^u must be a 1-D vector"):
                     bad = params(limb_dark=law, u=make(shape))
-                    f([bad] if f is m.light_curves else bad)
+                    # (a bound method is a fresh object per access, so
+                    # `f is m.light_curves` was always False)
+                    f([bad] if f.__name__ == "light_curves" else bad)
+        # a wrong shape is rejected at construction too
+        with pytest.raises(ValueError, match="^u must be a 1-D vector"):
+            metalplanet.TransitModel(params(limb_dark=law, u=make((n, 1))),
+                                     T)
         if container == "mx":                 # 0-d used to die in list()
             with pytest.raises(ValueError, match="^u must be a 1-D vector"):
                 m.light_curve_mx(params(limb_dark=law,
@@ -528,3 +534,62 @@ def test_works_on_the_default_stream():
     out = m.light_curve_mx(params(rp=mx.array(0.1, dtype=mx.float64)))
     mx.eval(out)
     assert out.dtype == mx.float64
+
+
+def test_mixed_u_list_does_not_borrow_a_dtype():
+    """0.9.6 forced the first mx entry's dtype onto its Python neighbours:
+    u = [mx.array(1), 0.4] turned 0.4 into int 0 (flux 2e-3 off, no
+    error), and an fp32 entry rounded its neighbours before the model
+    cast. Each entry is now cast on its own, to the model dtype."""
+    m = metalplanet.TransitModel(params(), T)
+    ref = m.light_curve(params(u=[1.0, 0.4]))
+    with mx.stream(mx.cpu):
+        got = np.asarray(m.light_curve_mx(params(u=[mx.array(1), 0.4])))
+        assert np.array_equal(got, ref)
+        got = np.asarray(m.light_curve_mx(params(u=[mx.array(0.4,
+                                                              mx.float32),
+                                                     0.1])))
+        ref = m.light_curve(params(u=[float(np.float32(0.4)), 0.1]))
+        assert np.array_equal(got, ref)
+        # a nested non-mx entry beside an mx one gets the shape error, not
+        # an opaque TypeError from float()
+        for bad in ([mx.array(0.4), [0.25]], [mx.array(0.4),
+                                               np.array([0.25])]):
+            with pytest.raises(ValueError, match="^u must be a 1-D vector"):
+                m.light_curve_mx(params(u=bad))
+
+
+@pytest.mark.parametrize("law,u_sets", [
+    ("quadratic", [[0.4, 0.25], [0.3, 0.2], [0.5, 0.1]]),
+    ("polynomial", [[0.4, 0.25, 0.05], [0.3, 0.2, 0.1]]),
+    ("linear", [[0.4], [0.3], [0.5], [0.2]]),
+])
+def test_array_valued_light_curves_with_per_set_u(law, u_sets):
+    """0.9.6 regression: the array-valued light_curves form -- one
+    TransitParams whose attributes are arrays -- takes a per-set
+    (n_sets, N) u (README), and routing it through the single-set
+    normaliser rejected it. (0.9.5's count there was wrong too: it
+    counted sets, not coefficients, for a polynomial law.) It must match
+    the looped light_curve."""
+    u_sets = np.asarray(u_sets)
+    n = u_sets.shape[0]
+    m = metalplanet.TransitModel(params(limb_dark=law, u=list(u_sets[0])),
+                                 T)
+    pa = params(limb_dark=law, u=u_sets)
+    pa.rp = np.linspace(0.09, 0.12, n)
+    got = m.light_curves(pa)
+    assert got.shape == (n, T.size)
+    for j in range(n):
+        ref = m.light_curve(params(limb_dark=law, u=list(u_sets[j]),
+                                   rp=float(pa.rp[j])))
+        assert np.abs(got[j] - ref).max() < 1e-14, j
+    # a shared (N,) u still broadcasts over the sets
+    pa.u = u_sets[0]
+    assert m.light_curves(pa).shape == (n, T.size)
+    # and a mismatched set count, or a 3-D u, is an error, not a reshape
+    pa.u = np.vstack([u_sets, u_sets])
+    with pytest.raises(ValueError, match="inconsistent parameter-array"):
+        m.light_curves(pa)
+    pa.u = u_sets[:, :, None]
+    with pytest.raises(ValueError, match="u must be"):
+        m.light_curves(pa)
