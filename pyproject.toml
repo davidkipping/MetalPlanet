@@ -7,6 +7,7 @@ name = "metalplanet"
 version = "0.9.7"
 description = "MetalPlanet: analytic, differentiable transit light curves on Apple Silicon (MLX), with a batman-style frontend"
 readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = ["mlx>=0.30", "numpy"]
 

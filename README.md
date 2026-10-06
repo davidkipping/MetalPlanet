@@ -60,7 +60,8 @@ dependency arrow. See [CHANGELOG.md](CHANGELOG.md) for version history
    from the same code.
 3. **Sampler-ready.** `metalplanet.anvil` provides the batched,
    float32-conditioned model contract for the
-   [anvil](../anvil) (formerly applemcmc) MCMC engine: epoch-centered
+   anvil (formerly applemcmc) MCMC engine (not yet public; see
+   [Install](#install--test)): epoch-centered
    times, offset parameters, Kipping (2013) (q₁,q₂) limb darkening, and
    a synthetic injection-recovery target. ChEES-HMC runs with zero
    divergences on this model.
@@ -91,10 +92,21 @@ python -m pytest tests -m "not slow"   # fast suite (~5 s)
 python examples/injection_recovery.py  # full GPU injection-recovery
 ```
 
-The engine integration (`metalplanet.anvil`) needs `anvil`/`applemcmc`
-installed; everything else imports standalone. If you rename or move
-either repo, re-run the editable installs (`pip install -e ...`) — the
-venv stores absolute paths.
+> **Note on anvil.** The MCMC engine that `metalplanet.anvil`, the
+> sampler guide (`docs/sampler-integration.md`) and several examples and
+> benchmarks refer to is a separate package that is **not yet public**.
+> It is an optional dependency: everything else in MetalPlanet — the
+> batman-style `TransitModel`, the Metal kernels, `flux_dev_from_tau`,
+> and the gradients — imports and runs without it. `metalplanet.anvil`
+> imports it lazily: its model builders (`make_quad_transit_flux`,
+> `make_ecc_transit_flux`) work without it, and only the sampler targets
+> (`make_target`, `make_ecc_target`, `make_transit_target`) need it, failing
+> with an ImportError when called. The sampler recipes using emcee or your
+> own code apply as written.
+
+If you have anvil installed, rename or move either repo, and use
+editable installs, re-run them (`pip install -e ...`) — the venv stores
+absolute paths.
 
 ## Evaluating many parameter sets
 
@@ -407,3 +419,7 @@ leave `secosw`/`sesinw` unset.
   Markley Kepler: starter + one fifth-order refinement) — no
   data-dependent control flow, so everything is `mx.compile`-safe and
   batches cleanly.
+
+## License
+
+MIT; see [LICENSE](LICENSE).
