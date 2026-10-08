@@ -456,11 +456,14 @@ def flux_dev_hybrid(z: mx.array, r, w, law) -> mx.array:
 def combine_cols(cols, w, law) -> mx.array:
     """F - 1 from the shape columns: (E0 - sum_j w_j T_j) / (pi - sum_j
     w_j N_j), as one sequential expression. ``cols`` is the list
-    [E0, T_1..T_n] (each any shape), ``w`` as flux_dev_hybrid takes it.
+    [E0, T_1..T_n] (each any shape) or the stacked (..., 1 + n_w) array
+    (shape_cols' / ld_basis' form); ``w`` as flux_dev_hybrid takes it.
     THE off-kernel expression: flux_dev_hybrid, the z-kernel entry point's
     fallback and the fp64 tau graph all call it, so every route off the
     kernels agrees bitwise."""
     law = get_law(law)
+    if isinstance(cols, mx.array):
+        cols = [cols[..., j] for j in range(cols.shape[-1])]
     N = law.norms()
     if isinstance(w, mx.array):
         n = w.shape[-1] if w.ndim else 1

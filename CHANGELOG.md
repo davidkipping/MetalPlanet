@@ -5,6 +5,52 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.10.6] — 2026-10-08
+
+Code-review round on 0.10.5. The two substantive findings were
+package-wide contracts, not entry-point bugs; both are now stated and
+enforced in one place each.
+
+### Changed
+- **The dtype of the data is the dtype of the computation, and non-MLX
+  data keeps its precision.** `metal.as_data` converts a non-mx.array
+  z or tau honouring its dtype: float32 numpy stays fp32, float64 numpy
+  and Python sequences are fp64. Before, `mx.array()` took a float64
+  numpy array to fp32 silently on the hybrid z and both tau entry
+  points (kernel-precision numbers for a caller who believed they had
+  the fp64 graph -- the trap in the project's own numerics notes), while
+  the quadratic z entry raised MLX's "unsupported dtype for cel". A
+  numpy float64 caller of a kernel entry point now gets the exact CPU
+  graph; pass `mx.array(x, dtype=mx.float32)` for the kernel. The
+  README states the rule.
+- **An fp64 parameter alongside fp32 data is cast, not an exception.**
+  MLX refuses any fp64 array on the GPU, so an fp64 radius, coefficient
+  or weight vector with fp32 z or tau raised in every kernel entry
+  point. `_canon_param` casts an off-dtype mx.array parameter to the
+  data's dtype first, on the CPU stream; `_canon_w` did so already but
+  after a GPU broadcast (so it raised before it got there) and now casts
+  first. One place each, all four entry points fixed.
+- **One fp64 re-route.** `metal.fp64_on_cpu` decorates the four kernel
+  entry points (`flux_dev_metal`, `_flux_dev_from_tau_impl`,
+  `flux_dev_from_tau_hybrid`, `flux_dev_metal_hybrid`): converts the
+  data by `as_data` and runs the call on the CPU stream when it is fp64
+  on the GPU stream. The four hand-copied re-routes (each keyed on its
+  own argument) are gone.
+- `hybrid.combine_cols` takes the stacked (..., 1 + n_w) columns as well
+  as the list, so the tau graph (and the test) pass `shape_cols`' /
+  `ld_basis`' output straight in. Two dead function-local `.hybrid`
+  imports in metal_hybrid.py removed (the module-level import made the
+  cycle guard moot). `tests/test_api.py`'s parity test skips unless
+  Metal *and* the GPU stream are there, since it asserts the kernel's
+  cache key.
+
+### Tests
+- New: fp64 parameters with fp32 data on all five z/tau entry forms
+  (kernel runs, fp32 out, within an ulp of the all-fp32 call); numpy
+  float64, numpy float32 and Python-list data on the same five (bitwise
+  the explicit-dtype mx.array call). 1196 green; corpus 296/296 bitwise;
+  18 kernel sources byte-identical.
+
 ## [0.10.5] — 2026-10-08
 
 Code-review round on 0.10.4.

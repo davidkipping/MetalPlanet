@@ -32,7 +32,7 @@ import mlx.core as mx
 import numpy as np
 
 from . import metal as M
-from .hybrid import combine_cols, get_law
+from .hybrid import combine_cols, flux_dev_hybrid, get_law, shape_cols
 
 __all__ = ["flux_dev_from_tau_hybrid", "flux_dev_metal_hybrid"]
 
@@ -509,7 +509,6 @@ def _tau_graph(tau, period, a, b, r, w2d, exp_time, mode, n_gl, n_sub,
     from .anchored import separation_anchored
     from .exposure import (contact_offsets, contact_offsets_anchored,
                            exposure_nodes)
-    from .hybrid import shape_cols
     from .orbit import separation_circular
 
     law = get_law(law)
@@ -556,7 +555,7 @@ def _tau_graph(tau, period, a, b, r, w2d, exp_time, mode, n_gl, n_sub,
         return B
     # the one off-kernel expression (hybrid.combine_cols): w2d (n, n_w)
     # rows broadcast against B's (n, m) as flux_dev_hybrid's batched form
-    return combine_cols([B[..., k] for k in range(B.shape[-1])], w2d, law)
+    return combine_cols(B, w2d, law)
 
 
 # ---------------------------------------------------------------------------
@@ -570,6 +569,11 @@ def _canon_w(u, n, n_w, dtype, name):
     # float64 numpy array without a dtype rounds it through fp32 first
     w = u if isinstance(u, mx.array) else mx.array(
         np.asarray(u, dtype=np.float64), dtype=dtype)
+    if w.dtype != dtype:
+        # before any GPU op on it: an fp64 array cannot even be broadcast
+        # there (0.10.5 cast last, after the broadcast, and so raised)
+        with mx.stream(mx.cpu):
+            w = w.astype(dtype)
     if w.ndim == 1:
         if w.shape[0] != n_w:
             raise ValueError(f"{name} takes {n_w} weights; got {w.shape[0]}")
@@ -579,26 +583,17 @@ def _canon_w(u, n, n_w, dtype, name):
     else:
         raise ValueError(f"{name} weights must be ({n_w},) or (n, {n_w}); "
                          f"got shape {w.shape}")
-    if w.dtype != dtype:
-        with mx.stream(mx.cpu):
-            w = w.astype(dtype)
     return w
 
 
+@M.fp64_on_cpu
 def flux_dev_from_tau_hybrid(tau, period, a, b, r, law, u, exp_time, mode,
                              n_gl, n_sub, basis=False, k=None, h=None):
     """``metal.flux_dev_from_tau`` for a hybrid law (that function validates
     the keywords and delegates here)."""
     law = get_law(law)
-    if not isinstance(tau, mx.array):
-        tau = mx.array(tau)
     if tau.ndim not in (1, 2):
         raise ValueError(f"tau must be (m,) or (n, m); got {tau.shape}")
-    if tau.dtype == mx.float64 and M._gpu_stream_active():
-        with mx.stream(mx.cpu):
-            return flux_dev_from_tau_hybrid(tau, period, a, b, r, law, u,
-                                            exp_time, mode, n_gl, n_sub,
-                                            basis, k, h)
     squeeze = tau.ndim == 1
     tau2d = tau[None, :] if squeeze else tau
     ecc = k is not None
@@ -755,21 +750,15 @@ def _z_core(law, basis: bool):
     return core
 
 
+@M.fp64_on_cpu
 def flux_dev_metal_hybrid(z, r, law, u, basis=False):
     """``metal.flux_dev_metal`` for a hybrid law: (n, m) or (m,) points,
     r per chain; F - 1, or with ``basis`` the z.shape + (1 + n_w,)
-    shape-basis columns. fp64 takes hybrid.py's graph on the CPU stream
-    (put there here, as flux_dev_from_tau does: MLX has no fp64 on Metal
-    at all, so without it the fallback would raise, not fall back)."""
-    from .hybrid import flux_dev_hybrid, shape_cols
+    shape-basis columns. z's dtype is the computation's; fp64 takes
+    hybrid.py's graph on the CPU stream (metal.fp64_on_cpu)."""
     law = get_law(law)
-    if not isinstance(z, mx.array):
-        z = mx.array(z)
     if z.ndim not in (1, 2):
         raise ValueError(f"z must be (m,) or (n, m); got {z.shape}")
-    if z.dtype == mx.float64 and M._gpu_stream_active():
-        with mx.stream(mx.cpu):
-            return flux_dev_metal_hybrid(z, r, law, u, basis=basis)
     squeeze = z.ndim == 1
     z2d = z[None, :] if squeeze else z
     n_param = r.shape[0] if isinstance(r, mx.array) and r.ndim >= 1 else 1

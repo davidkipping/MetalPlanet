@@ -538,6 +538,72 @@ def test_tau_graph_combine_is_the_shared_expression_bitwise(law, dtype):
     with mx.stream(mx.cpu):
         a = flux_dev_from_tau(tau, *geo, limb_dark=law, u=w)
         B = flux_dev_from_tau(tau, *geo, limb_dark=law, ld_basis=True)
-        b = combine_cols([B[..., k] for k in range(B.shape[-1])], w, law)
+        b = combine_cols(B, w, law)
         mx.eval(a, b)
     assert np.array_equal(np.asarray(a), np.asarray(b))
+
+
+# ---------------------------------------------------------------------------
+# the dtype contract (0.10.6): data dtype = computation dtype; parameters
+# of the other dtype are cast; numpy inputs keep their precision
+# ---------------------------------------------------------------------------
+
+Z = np.linspace(0.3, 1.2, 40)
+TAU = np.linspace(-0.12, 0.12, 40)
+W4 = [0.2, 0.2, 0.1, 0.1]
+
+
+def _entries(z, tau, r, u1, w):
+    from metalplanet.metal import flux_dev_from_tau, flux_dev_metal
+    from metalplanet.metal_hybrid import flux_dev_metal_hybrid
+    return {
+        "z-quadratic": lambda: flux_dev_metal(z, r, u1, 0.25),
+        "z-ld_basis": lambda: flux_dev_metal(z, r, ld_basis=True),
+        "z-hybrid": lambda: flux_dev_metal_hybrid(z, r, "hybrid4", w),
+        "tau-quadratic": lambda: flux_dev_from_tau(tau, 3.45, 8.8, 0.3, r,
+                                                   u1, 0.25),
+        "tau-hybrid": lambda: flux_dev_from_tau(tau, 3.45, 8.8, 0.3, r,
+                                                limb_dark="hybrid4", u=w),
+    }
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+@pytest.mark.parametrize("entry", ["z-quadratic", "z-ld_basis", "z-hybrid",
+                                   "tau-quadratic", "tau-hybrid"])
+def test_fp64_parameters_with_fp32_data_take_the_kernel(entry):
+    """An fp64 mx.array radius / coefficient / weight vector alongside
+    fp32 data is cast to fp32 (on the CPU stream) and the kernel runs;
+    before 0.10.6 every kernel entry point raised MLX's GPU error. Equal
+    to the all-fp32 call to an fp32 ulp."""
+    f64 = lambda v: mx.array(v, dtype=mx.float64)
+    f32 = lambda v: mx.array(v, dtype=mx.float32)
+    z, tau = f32(Z), f32(TAU)
+    mixed = _entries(z, tau, f64(0.1), f64(0.4), f64(W4))[entry]()
+    plain = _entries(z, tau, f32(0.1), f32(0.4), f32(W4))[entry]()
+    mx.eval(mixed, plain)
+    assert mixed.dtype == mx.float32
+    assert np.abs(np.asarray(mixed, np.float64)
+                  - np.asarray(plain, np.float64)).max() <= 1.5e-7
+
+
+@pytest.mark.parametrize("entry", ["z-quadratic", "z-ld_basis", "z-hybrid",
+                                   "tau-quadratic", "tau-hybrid"])
+@pytest.mark.parametrize("kind", ["numpy-f64", "numpy-f32", "list"])
+def test_non_mlx_data_keeps_its_precision(entry, kind):
+    """A float64 numpy array or a Python list is fp64 (the CPU graph,
+    bitwise what the explicit fp64 mx.array gives); float32 numpy is fp32
+    (the kernel, bitwise what the explicit fp32 mx.array gives). Before
+    0.10.6 mx.array() took float64 numpy to fp32 silently on the hybrid
+    and tau entries, and the quadratic z entry raised."""
+    if kind == "numpy-f64":
+        z, tau, dt = Z, TAU, mx.float64
+    elif kind == "numpy-f32":
+        z, tau, dt = Z.astype(np.float32), TAU.astype(np.float32), mx.float32
+    else:
+        z, tau, dt = Z.tolist(), TAU.tolist(), mx.float64
+    got = _entries(z, tau, 0.1, 0.4, W4)[entry]()
+    ref = _entries(mx.array(Z, dtype=dt), mx.array(TAU, dtype=dt),
+                   0.1, 0.4, W4)[entry]()
+    mx.eval(got, ref)
+    assert got.dtype == dt
+    assert np.array_equal(np.asarray(got), np.asarray(ref))

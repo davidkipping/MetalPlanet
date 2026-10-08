@@ -167,6 +167,13 @@ with mx.stream(mx.cpu):
 - Under `mx.grad`, MLX needs the CPU stream for any float64 input. With
   an fp32 GPU model, differentiate float32 fields there; for an absolute
   t0 (which must be fp64), take the gradient under `mx.stream(mx.cpu)`.
+- The dtype of the data is the dtype of the computation, on every entry
+  point (`flux_dev_from_tau`, `flux_dev_metal`): an fp32 mx.array of
+  tau or z takes the fused kernel; fp64 -- an fp64 mx.array, a float64
+  numpy array, a Python list -- takes the exact graph on the CPU stream,
+  put there for you. A parameter array of the other dtype is cast to the
+  data's. So hand the kernels `mx.array(x, dtype=mx.float32)`: a numpy
+  float64 array is not silently demoted (MLX's own `mx.array()` would).
 
 ## The batching rule (read this before writing a sampler)
 
