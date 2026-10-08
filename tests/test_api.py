@@ -148,22 +148,24 @@ class TestEccentricKernelRouting:
 
     @staticmethod
     def _model(ecc, dtype, kernel=True, n=20001, **kw):
-        import metalplanet.api as api
+        """kernel=False is use_metal=False: the graph model. (Until
+        0.10.4 this patched _kernel_usable around *construction* only,
+        but the check runs when the graph is first compiled, so the
+        'graph' model ran the kernel and the parity test compared the
+        kernel with itself.)"""
         p, _ = _params(ecc=ecc, w=63.0)
         t = np.linspace(-0.35, 0.35, n)
-        orig = api.TransitModel._kernel_usable
         if not kernel:
-            api.TransitModel._kernel_usable = lambda self: False
-        try:
-            return metalplanet.TransitModel(p, t, dtype=dtype, **kw), p
-        finally:
-            api.TransitModel._kernel_usable = orig
+            kw["use_metal"] = False
+        return metalplanet.TransitModel(p, t, dtype=dtype, **kw), p
 
     @pytest.mark.parametrize("ecc", [1e-4, 0.3, 0.7, 0.9])
     def test_kernel_matches_graph_and_fp64(self, ecc):
         mk, p = self._model(ecc, mx.float32, kernel=True)
         mg, _ = self._model(ecc, mx.float32, kernel=False)
         a, b = mk.light_curve(p), mg.light_curve(p)
+        assert list(mk._compiled) == [(False, True)]       # the kernel
+        assert list(mg._compiled) == [(False, False)]      # the graph
         with mx.stream(mx.cpu):
             m64, _ = self._model(ecc, mx.float64)
             ref = m64.light_curve(p)

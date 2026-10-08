@@ -356,9 +356,10 @@ class TransitModel:
 
         The kernel takes (n, m) points with r and the weights per row, so
         the shapes are flattened onto that: one row for a single parameter
-        set (any node axes folded into m), n rows for light_curves' sets;
-        r goes through as is (the entry point takes a scalar, (n,) or
-        (n, 1)).
+        set (any node axes folded into m), n rows for light_curves' sets.
+        r goes through as is: the entry point's canonicaliser takes a
+        scalar or anything of size n (light_curves' contact path hands it
+        (n, 1, 1)); a (1, n_w) weight row is broadcast there too.
         """
         law = self.limb_dark
         if not self._kernel_usable():
@@ -369,7 +370,8 @@ class TransitModel:
             out = flux_dev_metal_hybrid(mx.reshape(z, (-1,)), rp, law, uvec)
         else:
             n = z.shape[0]
-            w = mx.reshape(uvec, (n, -1)) if uvec.ndim >= 2 else uvec
+            w = (mx.reshape(uvec, (uvec.shape[0], -1)) if uvec.ndim >= 2
+                 else uvec)
             out = flux_dev_metal_hybrid(mx.reshape(z, (n, -1)), rp, law, w)
         return mx.reshape(out, z.shape)
 

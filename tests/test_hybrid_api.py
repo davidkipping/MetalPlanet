@@ -190,7 +190,9 @@ def test_a_cpu_stream_first_call_does_not_pin_the_graph(mode):
 @pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
 def test_float_radius_with_per_set_weights_takes_the_kernel_path():
     """_hybrid_dev's batched branch passes a Python-float radius to the
-    kernel as is (0.10.2 reshaped it; mx.reshape rejects floats)."""
+    kernel as is (0.10.1 reshaped it unguarded; mx.reshape rejects
+    floats). Every frontend route casts rp to an array before _photom,
+    so this guards the direct-call contract, not a frontend regression."""
     m = metalplanet.TransitModel(params("hybrid5"), T, dtype=mx.float32)
     z = mx.array(np.linspace(0.5, 1.2, 8, dtype=np.float32)).reshape(2, 4)
     w = mx.array(np.array([WEIGHTS["hybrid5"]] * 2, np.float32))
@@ -200,6 +202,22 @@ def test_float_radius_with_per_set_weights_takes_the_kernel_path():
     assert calls == [True]
     ref = flux_dev_hybrid(z, 0.1, w, "hybrid5")
     assert out.shape == (2, 4)
+    assert np.abs(np.asarray(out - ref, np.float64)).max() < 1e-6
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+def test_one_weight_row_broadcasts_on_the_kernel_route():
+    """A (1, n_w) weight row with n > 1 rows of z: the kernel entry point
+    broadcasts it (0.10.3 reshaped it by the z row count and raised)."""
+    m = metalplanet.TransitModel(params("hybrid4"), T, dtype=mx.float32)
+    z = mx.array(np.linspace(0.5, 1.2, 8, dtype=np.float32)).reshape(2, 4)
+    w1 = mx.array(np.array([WEIGHTS["hybrid4"]], np.float32))        # (1, 4)
+    rp = mx.array([0.1, 0.11], dtype=mx.float32)
+    with kernel_spy() as calls:
+        out = m._hybrid_dev(z, rp, w1)
+        mx.eval(out)
+    assert calls == [True]
+    ref = flux_dev_hybrid(z, rp[:, None], w1, "hybrid4")
     assert np.abs(np.asarray(out - ref, np.float64)).max() < 1e-6
 
 

@@ -454,3 +454,28 @@ def test_argument_checks():
         flux_dev_from_tau(t, P, 8.8, 0.3, 0.1, limb_dark="hybrid3", u=[0.1])
     with pytest.raises(ValueError, match="pass the hybrid2 weights as u="):
         flux_dev_metal(t, 0.1, 0.4, 0.2, limb_dark="hybrid2")
+
+
+# ---------------------------------------------------------------------------
+# the entry point's own fallback is hybrid.py's graph, bitwise (0.10.4)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("law", ["hybrid2", "hybrid4", "hybrid5"])
+@pytest.mark.parametrize("dtype", [mx.float64, mx.float32],
+                         ids=["fp64", "fp32-cpu-stream"])
+def test_z_entry_fallback_is_flux_dev_hybrid_bitwise(law, dtype):
+    """flux_dev_metal_hybrid off the kernel (fp64, or fp32 on the CPU
+    stream) is flux_dev_hybrid's expression exactly -- not a dot-product
+    contraction of the columns, which differed by 2.4e-7 in fp32."""
+    from metalplanet.hybrid import LAWS, flux_dev_hybrid
+    from metalplanet.metal_hybrid import flux_dev_metal_hybrid
+    n_w = LAWS[law].n_w
+    rng = np.random.default_rng(3)
+    z = mx.array(np.sort(rng.uniform(0.0, 1.3, (3, 400)), axis=1), dtype=dtype)
+    r = mx.array([0.05, 0.1, 0.3], dtype=dtype)
+    w = mx.array(rng.dirichlet(np.ones(n_w + 1), 3)[:, :n_w], dtype=dtype)
+    with mx.stream(mx.cpu):
+        a = flux_dev_metal_hybrid(z, r, law, w)
+        b = flux_dev_hybrid(z, r[:, None], w, law)
+        mx.eval(a, b)
+        assert np.array_equal(np.asarray(a), np.asarray(b))

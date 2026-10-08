@@ -5,6 +5,45 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.10.4] — 2026-10-08
+
+Code-review round on 0.10.3.
+
+### Fixed
+- **A quadratic parity test compared the fused model kernel with
+  itself.** `tests/test_api.py::TestEccentricKernelRouting` built its
+  "graph" model by patching `_kernel_usable` around *construction*, but
+  the check runs when the graph is first compiled, on the first call --
+  after the patch was restored. Both models ran the kernel, so
+  `test_kernel_matches_graph_and_fp64` had been vacuous since it was
+  written. The graph model is now `use_metal=False`, and the test pins
+  both cache keys. With a real graph on the other side it passes: kernel
+  vs graph 2.4-3.0e-7 at e = 1e-4..0.9 (20001 points); each 2.0-3.1e-7
+  from fp64. No kernel regression was hiding behind it.
+- **`flux_dev_metal_hybrid`'s own fallback is `flux_dev_hybrid`.** Off
+  the kernel (fp64, the CPU stream, a Metal-less machine) the public
+  entry point contracted the columns with a dot product, a different fp32
+  expression from hybrid.py's graph (2.4e-7 apart) -- the inconsistency
+  0.10.3 fixed for `TransitModel` only. Every caller now gets one
+  expression, bitwise; the frontend guard is an optimisation, not a
+  correctness patch. (`_combine` stays for the fp64 tau graph.)
+- A (1, n_w) weight row with several rows of z raised on `_hybrid_dev`'s
+  kernel route (reshaped by the z row count) while the graph broadcast
+  it; the row count now comes from the weights and the entry point
+  broadcasts.
+- `_hybrid_dev`'s docstring states the radius contract the code relies
+  on: a scalar or anything of size n (`light_curves`' contact path hands
+  it (n, 1, 1)), not the narrower list 0.10.3 gave.
+- The float-radius test's attribution: the unguarded reshape was
+  0.10.1's (0.10.2 added the guard), and the test guards the direct-call
+  contract, since every frontend route casts rp to an array first.
+
+### Tests
+- New: the entry point's fallback equals `flux_dev_hybrid` bitwise (fp64
+  and fp32 on the CPU stream, every law); a (1, n_w) row on the kernel
+  route. 1163 green; corpus 296/296 bitwise; 18 kernel sources
+  byte-identical.
+
 ## [0.10.3] — 2026-10-08
 
 Code-review round on 0.10.2.

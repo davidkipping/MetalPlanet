@@ -788,7 +788,11 @@ def flux_dev_metal_hybrid(z, r, law, u, basis=False):
     if z.dtype == mx.float32 and M._gpu_stream_active() and M.metal_available():
         core = _z_core(law, basis)
         out = core(z2d, rc) if basis else core(z2d, rc, w2d)
+    elif basis:
+        out = shape_cols(z2d, rc[:, None], law)
     else:
-        B = shape_cols(z2d, rc[:, None], law)
-        out = B if basis else _combine(B, w2d, law, 1)
+        # hybrid.py's graph itself, so every route to this function --
+        # fp64, the CPU stream, a Metal-less machine -- is one expression,
+        # bitwise (not _combine's dot product: 2.4e-7 apart in fp32)
+        out = flux_dev_hybrid(z2d, rc[:, None], w2d, law)
     return out[0] if squeeze and n == 1 else out
