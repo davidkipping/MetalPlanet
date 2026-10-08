@@ -290,8 +290,38 @@ integration to 1e-13 and against SquishierPlanet's ellipse code at a = b
 to 1e-12 (`metalplanet/hybrid.py`). The laws ride the same paths as the
 polynomial law: `light_curve`, `light_curves` (per-set weights), the
 contact rule, eccentric orbits, and `light_curve_mx` differentiable in
-every weight. Like the polynomial law they run on the MLX graph (fp32 on
-the GPU, fp64 on the CPU), not the fused kernel.
+every weight. On `TransitModel` they run on the MLX graph (fp32 on the
+GPU, fp64 on the CPU), not the fused model kernel, as the polynomial law
+does; on the fp64 CPU path that is already 1.3-2.8x faster than the
+quadratic law at 1e5-2e6 points, the cost of its elliptic integral.
+
+For samplers, `flux_dev_from_tau` has **fused fp32 kernels** for all three
+laws -- circular and eccentric orbits, every exposure rule, analytic
+gradients in tau, the orbit, r and every weight:
+
+```python
+dev = flux_dev_from_tau(tau, period, a, b, r, limb_dark="hybrid5",
+                        u=w,                     # (5,) shared or (n, 5) per chain
+                        exp_time=29.4 / 60 / 24, integration="contact")
+B = flux_dev_from_tau(tau, period, a, b, r, limb_dark="hybrid5",
+                      ld_basis=True, exp_time=29.4 / 60 / 24)
+# B: (n, m, 6) shape-basis columns [E0, T_1..T_5];
+# dev == (B @ c) / (N @ c), c = (1, -w), N = metalplanet.hybrid_norms("hybrid5")
+```
+
+| 512 x 5,000, contact, n_gl=5 | forward | vs quadratic | value+grad | vs quadratic |
+|---|---:|---:|---:|---:|
+| quadratic | 15.0 ms | 1.00x | 30.2 ms | 1.00x |
+| hybrid2 | 7.5 ms | **0.50x** | 18.0 ms | **0.60x** |
+| hybrid4 | 9.4 ms | 0.62x | 24.6 ms | 0.82x |
+| hybrid5 | 12.1 ms | 0.81x | 30.8 ms | 1.02x |
+| hybrid5, `ld_basis` | 14.1 ms | 0.94x | 31.7 ms | 1.05x |
+
+(`benchmarks/bench_hybrid.py`.) hybrid2 is twice as fast as quadratic at
+the same two parameters; hybrid5 carries three poles and five weight
+gradients and lands level with quadratic's value+grad while being as
+accurate as the Claret four-parameter law. `flux_dev_metal(z, r,
+limb_dark=..., u=...)` has the same kernels for the z-input path.
 
 ## Sampling per-transit times: `flux_dev_from_tau`
 

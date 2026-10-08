@@ -1347,7 +1347,8 @@ def _ld_basis_metal(z, r):
 
 
 def flux_dev_metal(z: mx.array, r, u1=None, u2=None, *,
-                   ld_basis: bool = False) -> mx.array:
+                   ld_basis: bool = False, limb_dark: str = "quadratic",
+                   u=None) -> mx.array:
     """F - 1 via the fused Metal kernels (fp32, GPU stream); silently
     falls back to flux_dev_analytic for fp64, CPU streams, unsupported
     layouts, or machines where the kernel probe fails.
@@ -1358,7 +1359,22 @@ def flux_dev_metal(z: mx.array, r, u1=None, u2=None, *,
     any quadratic law ``flux_dev_metal(z, r, u1, u2) == (B @ c) / (N @ c)``
     with c = (1 - u1 - u2, u1 + 2 u2, -u2) and N = (pi, 2 pi/3, pi/2).
     ``u1``/``u2`` are ignored there. See ``flux_dev_from_tau``.
+
+    ``limb_dark="hybrid2" | "hybrid4" | "hybrid5"`` with ``u`` the shape
+    weights selects a hybrid law, as in ``flux_dev_from_tau``.
     """
+    if limb_dark != "quadratic":
+        if u1 is not None or u2 is not None:
+            raise ValueError("u1/u2 are the quadratic law's coefficients; "
+                             f"pass the {limb_dark} weights as u=")
+        if u is None and not ld_basis:
+            raise ValueError(f"{limb_dark} needs its weights as u= unless "
+                             "ld_basis=True")
+        from .metal_hybrid import flux_dev_metal_hybrid
+        return flux_dev_metal_hybrid(z, r, limb_dark, u, basis=ld_basis)
+    if u is not None:
+        raise ValueError("u= is for the hybrid laws; the quadratic law "
+                         "takes u1, u2")
     if ld_basis:
         return _ld_basis_metal(z, r)
     if u1 is None or u2 is None:
@@ -1546,7 +1562,8 @@ def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1=None, u2=None, *,
                       exp_time: float = 0.0, integration: str = "contact",
                       n_gl: int = 5, n_sub: int = 1,
                       ld_basis: bool = False, secosw=None,
-                      sesinw=None) -> mx.array:
+                      sesinw=None, limb_dark: str = "quadratic",
+                      u=None) -> mx.array:
     """F - 1 from time-since-mid-transit, with the exposure integrated
     *inside* the kernel.
 
@@ -1587,6 +1604,14 @@ def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1=None, u2=None, *,
         ld_basis: return the limb-darkening *basis* instead of one
             limb-darkened curve (off by default; see below). ``u1``/``u2``
             are then ignored and may be omitted.
+        limb_dark, u: ``"quadratic"`` (the default, with ``u1``/``u2``), or
+            a hybrid law ``"hybrid2" | "hybrid4" | "hybrid5"`` with ``u``
+            its shape weights, ``(n_w,)`` shared or ``(n, n_w)`` per chain
+            (see ``metalplanet.hybrid``); same kernels' structure, no
+            elliptic integrals. With ``ld_basis=True`` a hybrid law returns
+            its (n, m, 1 + n_w) shape-basis columns B = [E0, T_1..T_n],
+            and ``flux - 1 == (B @ c)/(N @ c)`` with ``c = (1, -w)``,
+            ``N = hybrid.hybrid_norms(law)``.
         secosw, sesinw: (sqrt(e) cos w, sqrt(e) sin w), scalars or (n,).
             Omit both for a circular orbit (the default). Given, the orbit
             is the transit-anchored eccentric one (``anchored.py``), the
@@ -1631,10 +1656,25 @@ def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1=None, u2=None, *,
         raise ValueError("exp_time must be >= 0")
     if float(exp_time) == 0.0:
         mode = _INT_NONE
-    if not ld_basis and (u1 is None or u2 is None):
-        raise ValueError("u1 and u2 are required unless ld_basis=True")
     if (secosw is None) != (sesinw is None):
         raise ValueError("pass both secosw and sesinw, or neither")
+    if limb_dark != "quadratic":
+        # a hybrid law (metal_hybrid.py); its own kernels, nothing below
+        if u1 is not None or u2 is not None:
+            raise ValueError("u1/u2 are the quadratic law's coefficients; "
+                             f"pass the {limb_dark} weights as u=")
+        if u is None and not ld_basis:
+            raise ValueError(f"{limb_dark} needs its weights as u= unless "
+                             "ld_basis=True")
+        from .metal_hybrid import flux_dev_from_tau_hybrid
+        return flux_dev_from_tau_hybrid(
+            tau, period, a, b, r, limb_dark, u, float(exp_time), mode,
+            int(n_gl), int(n_sub), bool(ld_basis), secosw, sesinw)
+    if u is not None:
+        raise ValueError("u= is for the hybrid laws; the quadratic law "
+                         "takes u1, u2")
+    if not ld_basis and (u1 is None or u2 is None):
+        raise ValueError("u1 and u2 are required unless ld_basis=True")
     return _flux_dev_from_tau_impl(tau, period, a, b, r, u1, u2,
                                    float(exp_time), mode, int(n_gl),
                                    int(n_sub), bool(ld_basis), secosw,

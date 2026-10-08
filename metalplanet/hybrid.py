@@ -63,7 +63,7 @@ y = V / U:
 
     Q > 0  (z + r < sqrt p):  J = 4 / sqrt(Q) * atan2(sqrt V, sqrt U)
     Q < 0:                    J = 4 / sqrt(-Q) * ln[(sqrt U + sqrt(-V)) / (2 sqrt(z r eps))]
-    |y| small:                J = 4 T (1 - y/3 + y^2/5 - y^3/7) / (a_ + b_),  T = sqrt(A / -Bp)
+    |y| small:                J = 4 T G(y) / (a_ + b_),  G = sum_k (-y)^k/(2k+1),  T = sqrt(A / -Bp)
 
 The sign of Q flips on the line z + r = sqrt(1 + eps), which lies inside
 the partial regime of every transit (twice per transit per pole): a
@@ -104,10 +104,14 @@ _TWO_PI = 2.0 * math.pi
 #: hybrid2's single pole, tuned on the J-band training stars
 HYBRID2_EPS = 0.208
 
-#: half-width in y = V/U of the series bridge across the Q = 0 line; the
-#: four-term series truncates at y^4/9 (1e-13 in J), and |y| >= Y_SW keeps
-#: eps + Bp far enough from its cancellation for fp32 (measured)
-Y_SW = 1e-3
+#: half-width in y = V/U of the series bridge across the Q = 0 line, by
+#: precision. Outside it the closed forms are used, and their partials
+#: J2, J2c divide a numerator that vanishes like y by Q, losing ~log10(1/y)
+#: digits: 1e-3 costs 3 of fp64's 16, 0.05 costs 1.3 of fp32's 7. Inside
+#: it the six-term series of G(y) = sum (-y)^k / (2k + 1) truncates at
+#: y^6/13 (1e-19 in fp64 at 1e-3; 1.2e-9 in fp32 at 0.05, and its
+#: derivative at 6 y^5/13 = 1.4e-7). The Metal kernels use the fp32 rule.
+Y_SW = {mx.float64: 1e-3, mx.float32: 0.05}
 
 
 def ladder(K: int, alpha_eff: float = 1.0) -> tuple:
@@ -333,8 +337,9 @@ def _pole_terms(g, eps: float):
     U = mx.where(m_part, apb * nBp, one)
     ratio = (eps + Bp) / nBp                        # V = ratio * kite^2
     y = ratio * kite * kite / U
-    m_atan = mx.logical_and(m_part, y > Y_SW)
-    m_log = mx.logical_and(m_part, y < -Y_SW)
+    ysw = Y_SW.get(z.dtype, 1e-3)
+    m_atan = mx.logical_and(m_part, y > ysw)
+    m_log = mx.logical_and(m_part, y < -ysw)
     m_ser = mx.logical_and(m_part, mx.logical_not(mx.logical_or(m_atan, m_log)))
 
     sqU = mx.sqrt(U)
@@ -347,8 +352,11 @@ def _pole_terms(g, eps: float):
     J_log = 4.0 / sqQn * mx.log((sqU + sqVn) / (2.0 * zre))
     T = kite / nBp                                  # tan(kap0 / 2)
     ys = mx.where(m_ser, y, zero)
-    G = 1.0 - ys / 3.0 + ys * ys / 5.0 - ys * ys * ys / 7.0
-    Gp = -1.0 / 3.0 + 2.0 * ys / 5.0 - 3.0 * ys * ys / 7.0   # dG/dy
+    y2 = ys * ys
+    G = 1.0 - ys / 3.0 + y2 / 5.0 - ys * y2 / 7.0 + y2 * y2 / 9.0 \
+        - ys * y2 * y2 / 11.0
+    Gp = (-1.0 / 3.0 + 2.0 * ys / 5.0 - 3.0 * y2 / 7.0 + 4.0 * ys * y2 / 9.0
+          - 5.0 * y2 * y2 / 11.0)                         # dG/dy
     J_ser = 4.0 * T * G / apb
     J = mx.where(m_atan, J_atan, mx.where(m_log, J_log, J_ser))
     occ_p = kap1 / (p * eps) + (K * J - 2.0 * kap0) / (4.0 * p)

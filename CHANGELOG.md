@@ -50,7 +50,36 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
   one law-specific line is the dispatch in `_photom`. They run on the
   MLX graph (fp32 within 2e-6 of fp64), never the fused kernel, as the
   polynomial law does. 34 tests (`tests/test_hybrid_api.py`); existing
-  paths bitwise unchanged (296 arrays). The kernels follow in stage 3.
+  paths bitwise unchanged (296 arrays).
+- **Hybrid limb-darkening laws, stage 3 of 3: fused fp32 kernels**
+  (`metalplanet/metal_hybrid.py`). `flux_dev_from_tau(..., limb_dark=,
+  u=)` and `flux_dev_metal(..., limb_dark=, u=)` for all three laws:
+  circular and eccentric orbits, every exposure rule, analytic VJPs in
+  tau, the period, a, b, r, every weight (shared `(n_w,)` or per chain
+  `(n, n_w)`) and secosw/sesinw; `ld_basis=True` returns the
+  `(n, m, 1 + n_w)` shape-basis columns with the contract
+  `flux - 1 == (B @ c)/(N @ c)`, `c = (1, -w)`. The tau kernels are
+  derived from metal.py's orbit-generic templates by asserted
+  substitution (the quadrature, its tau derivative, the contact split and
+  the simd_sum reduction stay one copy); the device functions put
+  hybrid.py's closed forms in registers, per law by substituting its
+  poles, shape matrix and norms into one template. The fp64 graph path
+  computes the same function.
+
+  Measured: fp32 kernel within 1.2e-8 of the fp64 graph on every law,
+  rule and orbit (gates 5e-7, 2e-6 for hybrid5); the fp64 graph path
+  equals `TransitModel` to 1e-12; kernel VJPs match fp64 autodiff at the
+  quadratic kernel's gates; the basis VJP equals the scalar VJP through
+  the identity to 1e-5. At 512 x 5,000 with the contact rule: hybrid2 is
+  0.50x quadratic's forward time and 0.60x its value+grad, hybrid4
+  0.62x / 0.82x, hybrid5 0.81x / 1.02x (`benchmarks/bench_hybrid.py`) --
+  no elliptic integral. 183 tests (`tests/test_hybrid_metal.py`).
+
+  hybrid.py's series bridge across the Q = 0 line now has six terms and,
+  in fp32, a 0.05 half-width (1e-3 in fp64), so the closed-form partials'
+  near-cancellation there never costs fp32 more than ~1.3 digits; the
+  kernels use the fp32 rule. Quadratic kernels: all 18 sources
+  byte-identical, outputs bitwise unchanged (296 arrays); 1119 green.
 
 ## [0.9.7] — 2026-10-04
 
