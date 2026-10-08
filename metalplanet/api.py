@@ -326,20 +326,49 @@ class TransitModel:
     # Python-level dispatch on ecc == 0) selects between two graphs,
     # built lazily and cached per model.
 
-    def _photom(self, z, front, rp, u1, u2, fp, uvec=None):
+    def _photom(self, z, front, rp, u1, u2, fp, uvec=None, hyb_kernel=None):
         if self.transittype == "primary":
             z_eff = mx.where(front, z, 2.0 + z)
             if uvec is not None:          # a vector law: polynomial or hybrid
                 if self.limb_dark == "polynomial":
                     return 1.0 + flux_dev_poly(z_eff, rp, uvec,
                                                n_max=self._n_vec)
-                return 1.0 + flux_dev_hybrid(z_eff, rp, uvec, self.limb_dark)
+                return 1.0 + self._hybrid_dev(z_eff, rp, uvec, hyb_kernel)
             core = flux_dev_metal if self.use_metal else flux_dev
             return 1.0 + core(z_eff, rp, u1, u2)
         z_eff = mx.where(front, 2.0 + z, z)
         s0d, _, _ = sn_dev(z_eff, rp)
         # visible fraction of the (uniform) planet disk
         return 1.0 + fp * (1.0 + s0d / (math.pi * rp * rp))
+
+    def _hybrid_dev(self, z, rp, uvec, kernel=None):
+        """F - 1 for a hybrid law on separations ``z``: the fused z-input
+        kernel (metal_hybrid) wherever it can run -- the role flux_dev_metal
+        plays for the quadratic law -- and the graph otherwise. ``kernel``
+        is the compiled graphs' decision, fixed at build time and recorded
+        in their cache key; None decides now (the uncompiled batched path).
+
+        The kernel takes (n, m) points with r and the weights per row, so
+        the shapes are flattened onto that: one row for a single parameter
+        set (any node axes folded into m), n rows for light_curves' sets.
+        """
+        if kernel is None:
+            kernel = self.transittype == "primary" and self._kernel_usable()
+        if not kernel:
+            return flux_dev_hybrid(z, rp, uvec, self.limb_dark)
+        from .metal_hybrid import flux_dev_metal_hybrid
+        law = self.limb_dark
+        one_set = ((not isinstance(rp, mx.array) or rp.size == 1)
+                   and uvec.ndim == 1)
+        if one_set:
+            r = mx.reshape(rp, ()) if isinstance(rp, mx.array) else rp
+            out = flux_dev_metal_hybrid(mx.reshape(z, (-1,)), r, law, uvec)
+            return mx.reshape(out, z.shape)
+        n = z.shape[0]
+        w = mx.reshape(uvec, (n, -1)) if uvec.ndim >= 2 else uvec
+        out = flux_dev_metal_hybrid(mx.reshape(z, (n, -1)),
+                                    mx.reshape(rp, (-1,)), law, w)
+        return mx.reshape(out, z.shape)
 
     def _kernel_usable(self) -> bool:
         """Can the fused kernel run *here*: fp32, a usable Metal device,
@@ -372,13 +401,28 @@ class TransitModel:
         kernel_branch = (not ew and not vec and self.transittype == "primary"
                          and self.integration != "contact")
         kern = kernel_branch and self._kernel_usable()
-        key = "ew" if ew else (circular, kern)
+        # The hybrid laws' fused kernel is the z-input one, called from
+        # _photom on every graph below (contact rule and (e, w) route
+        # included): their kernel decision is the device one alone, and it
+        # enters the key the same way. Quadratic and polynomial keys are
+        # untouched.
+        hyb = self.limb_dark in _HYBRID_LAWS
+        if hyb:
+            kern = self.transittype == "primary" and self._kernel_usable()
+        key = ("ew", True) if (ew and kern) else ("ew" if ew else
+                                                  (circular, kern))
         fn = self._compiled.get(key)
         if fn is not None:
             return fn
         t = self._t_mx
         if ew:
             circular = False
+
+        def photom(*a, **kw):
+            """_photom with this graph's hybrid-kernel decision."""
+            return self.__class__._photom(self, *a,
+                                          hyb_kernel=kern if hyb else None,
+                                          **kw)
 
         def consts(k, h):
             """Keyword for the anchored helpers: nothing in (k, h) mode,
@@ -393,7 +437,7 @@ class TransitModel:
             ex = self.exp_time
 
             def _avg(z, front, rp, u1, u2, fp, uv, w):
-                f = self._photom(z, front, rp, u1, u2, fp, uvec=uv)
+                f = photom(z, front, rp, u1, u2, fp, uvec=uv)
                 return mx.sum(f * w, axis=1)
 
             if circular:
@@ -432,14 +476,14 @@ class TransitModel:
                 sphi, cphi = sincos(phase)
                 z = mx.sqrt(mx.maximum((a * sphi) ** 2 + (b * cphi) ** 2,
                                        1e-24))
-                return self._photom(z, cphi > 0.0, rp, None, None, fp,
+                return photom(z, cphi > 0.0, rp, None, None, fp,
                                     uvec=uv)
         elif vec:
             def raw(t0, per, a, k, h, ci, rp, uv, fp):
                 phi = (2.0 * math.pi) * (t - t0) / per
                 z, front = separation_anchored(phi, k, h, a, ci,
                                                **consts(k, h))
-                return self._photom(z, front, rp, None, None, fp, uvec=uv)
+                return photom(z, front, rp, None, None, fp, uvec=uv)
         elif circular and kern:
             # Circular orbit on the SAME fused kernel as the eccentric one:
             # k = h = 0 and cos i = b / a. Exact (the anchored orbit
@@ -466,7 +510,7 @@ class TransitModel:
                 sphi, cphi = sincos(phase)
                 z = mx.sqrt(mx.maximum((a * sphi) ** 2 + (b * cphi) ** 2,
                                        1e-24))
-                return self._photom(z, cphi > 0.0, rp, u1, u2, fp)
+                return photom(z, cphi > 0.0, rp, u1, u2, fp)
         elif kern and not ew:
             # Whole eccentric model in one kernel. (Not on the (e, w) route:
             # the kernel skips its seven eccentric-only gradient slots on
@@ -505,7 +549,7 @@ class TransitModel:
                 phi = (2.0 * math.pi) * (t - t0) / per
                 z, front = separation_anchored(phi, k, h, a, ci,
                                                **consts(k, h))
-                return self._photom(z, front, rp, u1, u2, fp)
+                return photom(z, front, rp, u1, u2, fp)
 
         fn = mx.compile(raw)
         self._compiled[key] = fn

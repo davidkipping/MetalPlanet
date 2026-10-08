@@ -290,10 +290,12 @@ integration to 1e-13 and against SquishierPlanet's ellipse code at a = b
 to 1e-12 (`metalplanet/hybrid.py`). The laws ride the same paths as the
 polynomial law: `light_curve`, `light_curves` (per-set weights), the
 contact rule, eccentric orbits, and `light_curve_mx` differentiable in
-every weight. On `TransitModel` they run on the MLX graph (fp32 on the
-GPU, fp64 on the CPU), not the fused model kernel, as the polynomial law
-does; on the fp64 CPU path that is already 1.3-2.8x faster than the
-quadratic law at 1e5-2e6 points, the cost of its elliptic integral.
+every weight. On an fp32 GPU `TransitModel` the orbit runs on the MLX
+graph and the photometry in the fused hybrid z-kernel (as the quadratic
+law's `flux_dev_metal`), level with the quadratic law's fused model
+kernel: 1.5-2.3 ms against 1.7 ms at 2e6 points. On the fp64 CPU path
+(the graph throughout) they are 1.3-2.8x faster than the quadratic law at
+1e5-2e6 points, the cost of its elliptic integral.
 
 For samplers, `flux_dev_from_tau` has **fused fp32 kernels** for all three
 laws -- circular and eccentric orbits, every exposure rule, analytic

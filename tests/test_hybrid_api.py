@@ -81,13 +81,121 @@ def test_wrong_or_changed_count_raises(law):
 
 
 @pytest.mark.parametrize("law", NAMES)
-def test_eccentric_runs_on_the_graph(law):
-    """Vector laws never take the fused kernel; the cache key says so."""
+def test_eccentric_runs(law):
     p = params(law, ecc=0.3, w=63.0)
-    m = metalplanet.TransitModel(p, T, dtype=mx.float32)
+    m = metalplanet.TransitModel(p, T)
     f = m.light_curve(p)
     assert f.min() < 0.99 and np.isfinite(f).all()
-    assert list(m._compiled) == [(False, False)]
+    assert list(m._compiled) == [(False, False)]          # fp64: the graph
+
+
+# ---------------------------------------------------------------------------
+# fp32 GPU: the fused z-input kernel behind _photom
+# ---------------------------------------------------------------------------
+
+MODES = {"plain": {}, "contact": dict(exp_time=EXP, integration="contact"),
+         "supersample": dict(exp_time=EXP, supersample_factor=5)}
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+@pytest.mark.parametrize("law", NAMES)
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("ecc", [0.0, 0.3], ids=["circ", "e0.3"])
+def test_fp32_gpu_model_runs_the_fused_kernel(law, mode, ecc):
+    """The photometry runs in metal_hybrid's z-kernel -- the cache key
+    records it -- and agrees with the fp32 graph (use_metal=False) at fp32
+    noise and with the fp64 model within 2e-6."""
+    p = params(law, ecc=ecc, w=63.0)
+    m = metalplanet.TransitModel(p, T, dtype=mx.float32, **MODES[mode])
+    got = m.light_curve(p)
+    assert (ecc == 0.0, True) in m._compiled
+    graph = metalplanet.TransitModel(p, T, dtype=mx.float32, use_metal=False,
+                                     **MODES[mode]).light_curve(p)
+    f64 = metalplanet.TransitModel(p, T, **MODES[mode]).light_curve(p)
+    assert np.abs(got - graph).max() < 1e-6
+    assert np.abs(got - f64).max() < 2e-6
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+@pytest.mark.parametrize("law", NAMES)
+@pytest.mark.parametrize("mode", ["plain", "contact"])
+def test_fp32_light_curves_match_the_loop(law, mode):
+    n = 4
+    rng = np.random.default_rng(5)
+    W = (ld.simplex_from_q_np(rng.random((n, LAWS[law].n_w)))
+         if law != "hybrid2"
+         else np.stack(ld.hybrid2_from_q_np(rng.random(n), rng.random(n)), -1))
+    rp = np.linspace(0.08, 0.12, n)
+    m = metalplanet.TransitModel(params(law), T, dtype=mx.float32,
+                                 **MODES[mode])
+    pa = params(law)
+    pa.rp, pa.u = rp, W
+    got = m.light_curves(pa)
+    # one row per set vs one flattened row: the same per-point kernel, so
+    # they differ by the rounding of 1 + dev at most (one fp32 ulp of 1)
+    ulp = float(np.finfo(np.float32).eps)
+    for j in range(n):
+        ref = m.light_curve(params(law, u=W[j], rp=float(rp[j])))
+        assert np.abs(got[j] - ref).max() <= 2 * ulp, j
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+def test_a_cpu_stream_first_call_does_not_pin_the_graph():
+    """The v0.9.2 trap, for the hybrid kernel: the decision is made at
+    build time from the active stream, so it must be in the cache key."""
+    law = "hybrid5"
+    m = metalplanet.TransitModel(params(law), T, dtype=mx.float32)
+    with mx.stream(mx.cpu):
+        a = m.light_curve(params(law))
+    assert (True, False) in m._compiled
+    b = m.light_curve(params(law))
+    assert (True, True) in m._compiled
+    assert np.abs(a - b).max() < 1e-6
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+@pytest.mark.parametrize("law", NAMES)
+def test_fp32_light_curve_mx_gradients_through_the_kernel(law):
+    """Gradients in rp, a, inc and every weight through the kernel's VJP
+    against the fp64 model's, condition-scaled."""
+    n_w = LAWS[law].n_w
+    w0 = np.array(WEIGHTS[law])
+    ct = np.random.default_rng(6).normal(size=T.size)
+
+    def grads(dtype):
+        m = metalplanet.TransitModel(params(law), T, dtype=dtype)
+        ctx = mx.stream(mx.cpu) if dtype == mx.float64 else mx.stream(mx.gpu)
+        with ctx:
+            c = mx.array(ct, dtype=dtype)
+
+            def loss(rp, a, inc, w):
+                return mx.sum(c * m.light_curve_mx(
+                    params(law, u=w, rp=rp, a=a, inc=inc)))
+
+            g = mx.grad(loss, argnums=(0, 1, 2, 3))(
+                *[mx.array(v, dtype=dtype) for v in (RP, A, INC)],
+                mx.array(w0, dtype=dtype))
+            mx.eval(g)
+        if dtype == mx.float32:
+            assert (True, True) in m._compiled
+        return np.concatenate([np.atleast_1d(np.asarray(x, np.float64))
+                               for x in g])
+
+    g32, g64 = grads(mx.float32), grads(mx.float64)
+    assert g32.shape == (3 + n_w,)
+    scale = np.abs(g64).max()
+    assert np.abs(g32 - g64).max() / scale < 2e-3
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+def test_array_eccentricity_route_uses_the_kernel_too():
+    law = "hybrid4"
+    m = metalplanet.TransitModel(params(law, ecc=0.3, w=63.0), T,
+                                 dtype=mx.float32)
+    out = np.asarray(m.light_curve_mx(params(law, ecc=mx.array(0.3), w=63.0)),
+                     dtype=np.float64)
+    assert ("ew", True) in m._compiled
+    assert np.abs(out - m.light_curve(params(law, ecc=0.3, w=63.0))).max() < 1e-6
 
 
 @pytest.mark.parametrize("law", NAMES)

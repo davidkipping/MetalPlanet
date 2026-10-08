@@ -5,6 +5,30 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+### Changed
+- **`TransitModel` runs the hybrid laws' photometry in the fused fp32
+  kernel.** On an fp32 GPU model, `_photom` now sends a hybrid law to
+  metal_hybrid's z-input kernel -- the role `flux_dev_metal` plays for the
+  quadratic law -- with the orbit still on the MLX graph. Every frontend
+  path takes it: `light_curve`, `light_curves` (one kernel row per set),
+  the contact and supersample rules, eccentric orbits and the (e, w)
+  route of `light_curve_mx`; the contact rule's nodes still move with the
+  parameters. At 2e6 points: hybrid2 4.2 -> 1.7 ms, hybrid4 5.2 -> 1.5 ms,
+  hybrid5 7.4 -> 2.3 ms, against the quadratic law's fused model kernel at
+  1.7 ms. Chosen over a new fused *model* kernel per law (an estimated
+  further ~0.5 ms per 2e6-point call) and over routing through the tau
+  kernels (measured 1.4-2.4 ms): one call site, no new Metal code.
+
+  The kernel decision is made at graph build time from the active stream,
+  so it is in the compiled-graph cache key, as the quadratic kernel's is
+  since 0.9.2 (`("ew", True)` for the (e, w) route); a CPU-stream first
+  call cannot pin a later GPU call to the graph. Agrees with the fp32
+  graph to 1e-6 and the fp64 model to 2e-6; `light_curve_mx` gradients
+  through the kernel's VJP match fp64 to 2e-3 of their scale. Quadratic
+  and polynomial paths unchanged: same keys, same ops, 296-array corpus
+  bitwise identical, 18 kernel sources byte-identical. 29 tests; 1148
+  green.
+
 ## [0.10.0] — 2026-10-08
 
 ### Added
