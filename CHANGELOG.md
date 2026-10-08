@@ -5,6 +5,50 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.10.2] — 2026-10-08
+
+Code-review round on 0.10.1. Its headline finding -- that the quadratic
+law's contact-rule and (e, w) graphs carry the v0.9.2 stream-pinning trap
+-- turned out to be false, and showed 0.10.1's own guard against it to be
+unnecessary.
+
+### Changed
+- **The hybrid z-kernel decision moved into the trace; the 0.10.1 cache
+  key is gone.** A z-input kernel entry point (`flux_dev_metal`,
+  `flux_dev_metal_hybrid`) decides on the active stream *inside* the
+  compiled graph, and `mx.compile` keeps one trace per stream (verified
+  on MLX 0.32.2: a function traced on the CPU stream is retraced, kernel
+  and all, when first called on the GPU). So no graph reached through
+  `_photom` can be pinned to the graph photometry, quadratic or hybrid,
+  and the 0.9.2 key is needed only for the fused *model* kernel, chosen
+  in Python before tracing. `_hybrid_dev` now settles only what cannot
+  vary per call (dtype, `use_metal`, a Metal device) and calls the entry
+  point, which falls back on its own; the `hyb_kernel` argument, the
+  per-graph `photom` closure, the `("ew", True)` key and the duplicated
+  device check are removed. Cache keys are 0.10.0's again. Same speed:
+  2e6 points fp32 GPU, hybrid2/4/5 1.3/1.1/1.5 ms vs quadratic 1.6 ms.
+
+### Fixed
+- `_hybrid_dev` reshaped a Python-float radius in its per-set-weights
+  branch (`mx.reshape` rejects floats); no frontend caller passed one,
+  but the kernel accepts a scalar r, and now so does the branch.
+- Three docstrings (`_kernel_usable`, `_model_eval`, `light_curve_mx`)
+  still said the hybrid laws, the (e, w) route and the contact rule never
+  use a fused kernel; they now distinguish the fused *model* kernel
+  (quadratic, plain graphs) from the z-input kernels every other fp32
+  graph takes.
+
+### Tests
+- The hybrid kernel-route tests assert the route through a spy on the
+  entry point (the stream each trace saw) rather than through cache keys;
+  the CPU-stream-first test now shows two traces under one key, on the
+  plain and contact graphs. New: a float radius with per-set weights.
+- `test_fp32_light_curves_match_the_loop` gate 2 -> 4 fp32 ulps, with the
+  reason: the two sides form z from different fp32 orbit expressions
+  (anchored with k = h = 0 vs the circular graph); measured 0.5-1.0 ulp
+  over seeds, so 2 was a margin, not a bound. 1150 green; corpus 296/296
+  bitwise; 18 kernel sources byte-identical.
+
 ## [0.10.1] — 2026-10-08
 
 ### Changed
@@ -21,10 +65,11 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
   further ~0.5 ms per 2e6-point call) and over routing through the tau
   kernels (measured 1.4-2.4 ms): one call site, no new Metal code.
 
-  The kernel decision is made at graph build time from the active stream,
-  so it is in the compiled-graph cache key, as the quadratic kernel's is
-  since 0.9.2 (`("ew", True)` for the (e, w) route); a CPU-stream first
-  call cannot pin a later GPU call to the graph. Agrees with the fp32
+  The kernel decision was made at graph build time from the active stream
+  and put in the compiled-graph cache key (`("ew", True)` for the (e, w)
+  route) -- needlessly, as 0.10.2 found; the key is gone again there. A
+  CPU-stream first call cannot pin a later GPU call to the graph. Agrees
+  with the fp32
   graph to 1e-6 and the fp64 model to 2e-6; `light_curve_mx` gradients
   through the kernel's VJP match fp64 to 2e-3 of their scale. Quadratic
   and polynomial paths unchanged: same keys, same ops, 296-array corpus

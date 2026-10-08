@@ -7,6 +7,7 @@ These tests pin that plumbing for the three laws; the closed forms
 themselves are tested in test_hybrid.py.
 """
 
+import contextlib
 import math
 
 import numpy as np
@@ -97,18 +98,41 @@ MODES = {"plain": {}, "contact": dict(exp_time=EXP, integration="contact"),
          "supersample": dict(exp_time=EXP, supersample_factor=5)}
 
 
+@contextlib.contextmanager
+def kernel_spy():
+    """Records, per trace of the hybrid z-kernel entry point, whether the
+    GPU stream was active -- i.e. whether that trace took the kernel."""
+    import metalplanet.api as api
+    from metalplanet import metal as M
+    orig, calls = api.flux_dev_metal_hybrid, []
+
+    def spy(z, r, law, u, basis=False):
+        calls.append(bool(M._gpu_stream_active()))
+        return orig(z, r, law, u, basis=basis)
+
+    api.flux_dev_metal_hybrid = spy
+    try:
+        yield calls
+    finally:
+        api.flux_dev_metal_hybrid = orig
+
+
 @pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
 @pytest.mark.parametrize("law", NAMES)
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("ecc", [0.0, 0.3], ids=["circ", "e0.3"])
 def test_fp32_gpu_model_runs_the_fused_kernel(law, mode, ecc):
-    """The photometry runs in metal_hybrid's z-kernel -- the cache key
-    records it -- and agrees with the fp32 graph (use_metal=False) at fp32
-    noise and with the fp64 model within 2e-6."""
+    """The photometry runs in metal_hybrid's z-kernel -- the spy sees it
+    traced on the GPU stream -- and agrees with the fp32 graph
+    (use_metal=False) at fp32 noise and with the fp64 model within 2e-6.
+    The cache keys are the quadratic law's: the z-kernel decision lives in
+    the trace, not the key."""
     p = params(law, ecc=ecc, w=63.0)
     m = metalplanet.TransitModel(p, T, dtype=mx.float32, **MODES[mode])
-    got = m.light_curve(p)
-    assert (ecc == 0.0, True) in m._compiled
+    with kernel_spy() as calls:
+        got = m.light_curve(p)
+    assert calls == [True]
+    assert list(m._compiled) == [(ecc == 0.0, False)]
     graph = metalplanet.TransitModel(p, T, dtype=mx.float32, use_metal=False,
                                      **MODES[mode]).light_curve(p)
     f64 = metalplanet.TransitModel(p, T, **MODES[mode]).light_curve(p)
@@ -131,26 +155,47 @@ def test_fp32_light_curves_match_the_loop(law, mode):
     pa = params(law)
     pa.rp, pa.u = rp, W
     got = m.light_curves(pa)
-    # one row per set vs one flattened row: the same per-point kernel, so
-    # they differ by the rounding of 1 + dev at most (one fp32 ulp of 1)
+    # The same per-point kernel on both sides, but light_curves forms z on
+    # the anchored orbit (k = h = 0) and light_curve on the circular graph:
+    # two fp32 expressions, apart by ~a*eps, times |dF/dz| <~ 0.1, plus the
+    # rounding of 1 + dev -- about one fp32 ulp of 1 (measured 0.5 plain,
+    # 1.0 contact, over seeds). Gate at four.
     ulp = float(np.finfo(np.float32).eps)
     for j in range(n):
         ref = m.light_curve(params(law, u=W[j], rp=float(rp[j])))
-        assert np.abs(got[j] - ref).max() <= 2 * ulp, j
+        assert np.abs(got[j] - ref).max() <= 4 * ulp, j
 
 
 @pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
-def test_a_cpu_stream_first_call_does_not_pin_the_graph():
-    """The v0.9.2 trap, for the hybrid kernel: the decision is made at
-    build time from the active stream, so it must be in the cache key."""
+@pytest.mark.parametrize("mode", ["plain", "contact"])
+def test_a_cpu_stream_first_call_does_not_pin_the_graph(mode):
+    """The v0.9.2 trap does not apply to a z-kernel: its decision is made
+    inside the trace, and mx.compile keeps one trace per stream, so the
+    graph first traced on the CPU stream (graph photometry) is retraced
+    on the GPU with the kernel. One cache key, two traces, two outcomes;
+    the spy sees the stream each trace saw."""
     law = "hybrid5"
-    m = metalplanet.TransitModel(params(law), T, dtype=mx.float32)
-    with mx.stream(mx.cpu):
-        a = m.light_curve(params(law))
-    assert (True, False) in m._compiled
-    b = m.light_curve(params(law))
-    assert (True, True) in m._compiled
+    m = metalplanet.TransitModel(params(law), T, dtype=mx.float32,
+                                 **MODES[mode])
+    with kernel_spy() as calls:
+        with mx.stream(mx.cpu):
+            a = m.light_curve(params(law))
+        b = m.light_curve(params(law))
+        m.light_curve(params(law))
+    assert calls == [False, True]
+    assert list(m._compiled) == [(True, False)]
     assert np.abs(a - b).max() < 1e-6
+
+
+def test_float_radius_with_per_set_weights_takes_the_kernel_path():
+    """_hybrid_dev's batched branch must not reshape a Python float."""
+    m = metalplanet.TransitModel(params("hybrid5"), T, dtype=mx.float32)
+    z = mx.array(np.linspace(0.5, 1.2, 8, dtype=np.float32)).reshape(2, 4)
+    w = mx.array(np.array([WEIGHTS["hybrid5"]] * 2, np.float32))
+    out = m._hybrid_dev(z, 0.1, w)
+    ref = flux_dev_hybrid(z, 0.1, w, "hybrid5")
+    assert out.shape == (2, 4)
+    assert np.abs(np.asarray(out - ref, np.float64)).max() < 1e-6
 
 
 @pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
@@ -176,8 +221,6 @@ def test_fp32_light_curve_mx_gradients_through_the_kernel(law):
                 *[mx.array(v, dtype=dtype) for v in (RP, A, INC)],
                 mx.array(w0, dtype=dtype))
             mx.eval(g)
-        if dtype == mx.float32:
-            assert (True, True) in m._compiled
         return np.concatenate([np.atleast_1d(np.asarray(x, np.float64))
                                for x in g])
 
@@ -192,9 +235,10 @@ def test_array_eccentricity_route_uses_the_kernel_too():
     law = "hybrid4"
     m = metalplanet.TransitModel(params(law, ecc=0.3, w=63.0), T,
                                  dtype=mx.float32)
-    out = np.asarray(m.light_curve_mx(params(law, ecc=mx.array(0.3), w=63.0)),
-                     dtype=np.float64)
-    assert ("ew", True) in m._compiled
+    with kernel_spy() as calls:
+        out = np.asarray(m.light_curve_mx(params(law, ecc=mx.array(0.3),
+                                                 w=63.0)), dtype=np.float64)
+    assert calls == [True] and list(m._compiled) == ["ew"]
     assert np.abs(out - m.light_curve(params(law, ecc=0.3, w=63.0))).max() < 1e-6
 
 
