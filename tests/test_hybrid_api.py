@@ -222,6 +222,36 @@ def test_one_weight_row_broadcasts_on_the_kernel_route():
 
 
 @pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+@pytest.mark.parametrize("wshape", [(4,), (1, 4)])
+def test_one_set_on_1d_z_is_one_kernel_row(wshape):
+    """A scalar radius with one set of weights on (m,) separations is one
+    (1, m) row of the kernel grid, not m single-point rows (0.10.4 sent a
+    (1, n_w) row down the batched branch with n = m)."""
+    import metalplanet.metal_hybrid as MH
+    m = metalplanet.TransitModel(params("hybrid4"), T, dtype=mx.float32)
+    z = mx.array(np.linspace(0.5, 1.2, 8, dtype=np.float32))
+    w = mx.array(np.reshape(WEIGHTS["hybrid4"], wshape), dtype=mx.float32)
+    shapes, orig = [], MH._z_core
+
+    def spy(law, basis):
+        core = orig(law, basis)
+
+        def wrapped(z2d, rc, *a):
+            shapes.append((z2d.shape, rc.shape) + tuple(x.shape for x in a))
+            return core(z2d, rc, *a)
+        return wrapped
+
+    MH._z_core = spy
+    try:
+        out = m._hybrid_dev(z, 0.1, w)
+        mx.eval(out)
+    finally:
+        MH._z_core = orig
+    assert shapes == [((1, 8), (1,), (1, 4))]
+    assert out.shape == (8,)
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
 @pytest.mark.parametrize("law", NAMES)
 @pytest.mark.parametrize("mode", ["plain", "contact"])
 def test_fp32_cpu_stream_fallback_is_the_graph_bitwise(law, mode):

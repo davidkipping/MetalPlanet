@@ -1351,7 +1351,9 @@ def flux_dev_metal(z: mx.array, r, u1=None, u2=None, *,
                    u=None) -> mx.array:
     """F - 1 via the fused Metal kernels (fp32, GPU stream); silently
     falls back to flux_dev_analytic for fp64, CPU streams, unsupported
-    layouts, or machines where the kernel probe fails.
+    layouts, or machines where the kernel probe fails. fp64 is put on the
+    CPU stream here (as ``flux_dev_from_tau`` does; MLX has no fp64 on
+    Metal at all), so the fallback is a fallback and not an exception.
 
     With ``ld_basis=True`` it returns the limb-darkening basis instead:
     shape ``z.shape + (3,)`` (with ``z`` broadcast over per-chain ``r``),
@@ -1363,6 +1365,11 @@ def flux_dev_metal(z: mx.array, r, u1=None, u2=None, *,
     ``limb_dark="hybrid2" | "hybrid4" | "hybrid5"`` with ``u`` the shape
     weights selects a hybrid law, as in ``flux_dev_from_tau``.
     """
+    if (isinstance(z, mx.array) and z.dtype == mx.float64
+            and _gpu_stream_active()):
+        with mx.stream(mx.cpu):
+            return flux_dev_metal(z, r, u1, u2, ld_basis=ld_basis,
+                                  limb_dark=limb_dark, u=u)
     if limb_dark != "quadratic":
         if u1 is not None or u2 is not None:
             raise ValueError("u1/u2 are the quadratic law's coefficients; "

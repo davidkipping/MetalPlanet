@@ -359,15 +359,18 @@ class TransitModel:
         set (any node axes folded into m), n rows for light_curves' sets.
         r goes through as is: the entry point's canonicaliser takes a
         scalar or anything of size n (light_curves' contact path hands it
-        (n, 1, 1)); a (1, n_w) weight row is broadcast there too.
+        (n, 1, 1)). One radius with one set of weights -- (n_w,) or a
+        (1, n_w) row -- is one row of the grid, never a row per point.
         """
         law = self.limb_dark
         if not self._kernel_usable():
             return flux_dev_hybrid(z, rp, uvec, law)
+        n_w = _HYBRID_LAWS[law].n_w
         one_set = ((not isinstance(rp, mx.array) or rp.size == 1)
-                   and uvec.ndim == 1)
-        if one_set:
-            out = flux_dev_metal_hybrid(mx.reshape(z, (-1,)), rp, law, uvec)
+                   and uvec.size == n_w)
+        if one_set:                        # (n_w,) or a (1, n_w) row
+            out = flux_dev_metal_hybrid(mx.reshape(z, (-1,)), rp, law,
+                                        mx.reshape(uvec, (-1,)))
         else:
             n = z.shape[0]
             w = (mx.reshape(uvec, (uvec.shape[0], -1)) if uvec.ndim >= 2

@@ -474,8 +474,70 @@ def test_z_entry_fallback_is_flux_dev_hybrid_bitwise(law, dtype):
     z = mx.array(np.sort(rng.uniform(0.0, 1.3, (3, 400)), axis=1), dtype=dtype)
     r = mx.array([0.05, 0.1, 0.3], dtype=dtype)
     w = mx.array(rng.dirichlet(np.ones(n_w + 1), 3)[:, :n_w], dtype=dtype)
-    with mx.stream(mx.cpu):
+    if dtype == mx.float64:
+        # the entry point puts fp64 on the CPU stream itself (0.10.5);
+        # the reference needs the stream from us
         a = flux_dev_metal_hybrid(z, r, law, w)
-        b = flux_dev_hybrid(z, r[:, None], w, law)
+        with mx.stream(mx.cpu):
+            b = flux_dev_hybrid(z, r[:, None], w, law)
+            mx.eval(a, b)
+    else:
+        with mx.stream(mx.cpu):
+            a = flux_dev_metal_hybrid(z, r, law, w)
+            b = flux_dev_hybrid(z, r[:, None], w, law)
+            mx.eval(a, b)
+    assert np.array_equal(np.asarray(a), np.asarray(b))
+
+
+# ---------------------------------------------------------------------------
+# fp64 on the default stream falls back; the tau graph's combine (0.10.5)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("call", ["z-hybrid", "z-hybrid-basis",
+                                  "flux_dev_metal-hybrid",
+                                  "flux_dev_metal-quadratic",
+                                  "flux_dev_metal-ld_basis"])
+def test_fp64_on_the_default_stream_falls_back_instead_of_raising(call):
+    """Every z-input entry point, like the tau ones since 0.8.2, puts
+    fp64 on the CPU stream itself: before 0.10.5 all five raised MLX's
+    'float64 is not supported on the GPU' unless the caller knew to."""
+    from metalplanet.metal import flux_dev_metal
+    from metalplanet.metal_hybrid import flux_dev_metal_hybrid
+    z = mx.array(np.linspace(0.3, 1.2, 50), dtype=mx.float64)
+    w = [0.2, 0.2, 0.1, 0.1]
+    out = {
+        "z-hybrid": lambda: flux_dev_metal_hybrid(z, 0.1, "hybrid4", w),
+        "z-hybrid-basis": lambda: flux_dev_metal_hybrid(z, 0.1, "hybrid4",
+                                                        None, basis=True),
+        "flux_dev_metal-hybrid": lambda: flux_dev_metal(
+            z, 0.1, limb_dark="hybrid4", u=w),
+        "flux_dev_metal-quadratic": lambda: flux_dev_metal(z, 0.1, 0.4, 0.25),
+        "flux_dev_metal-ld_basis": lambda: flux_dev_metal(z, 0.1,
+                                                          ld_basis=True),
+    }[call]()
+    mx.eval(out)
+    assert out.dtype == mx.float64 and np.isfinite(np.asarray(out)).all()
+
+
+@pytest.mark.parametrize("law", ["hybrid2", "hybrid4", "hybrid5"])
+@pytest.mark.parametrize("dtype", [mx.float64, mx.float32],
+                         ids=["fp64", "fp32-cpu-stream"])
+def test_tau_graph_combine_is_the_shared_expression_bitwise(law, dtype):
+    """Off the kernel, flux_dev_from_tau's scalar hybrid call equals
+    hybrid.combine_cols over its own ld_basis columns, bitwise: the tau
+    graph contracts with the one shared expression (0.10.4's dot product
+    was 2.4e-7 apart in fp32)."""
+    from metalplanet.hybrid import LAWS, combine_cols
+    from metalplanet.metal import flux_dev_from_tau
+    n_w = LAWS[law].n_w
+    rng = np.random.default_rng(4)
+    tau = mx.array(np.sort(rng.uniform(-0.12, 0.12, (3, 300)), axis=1),
+                   dtype=dtype)
+    w = mx.array(rng.dirichlet(np.ones(n_w + 1), 3)[:, :n_w], dtype=dtype)
+    geo = (3.45, 8.8, 0.3, 0.1)
+    with mx.stream(mx.cpu):
+        a = flux_dev_from_tau(tau, *geo, limb_dark=law, u=w)
+        B = flux_dev_from_tau(tau, *geo, limb_dark=law, ld_basis=True)
+        b = combine_cols([B[..., k] for k in range(B.shape[-1])], w, law)
         mx.eval(a, b)
-        assert np.array_equal(np.asarray(a), np.asarray(b))
+    assert np.array_equal(np.asarray(a), np.asarray(b))

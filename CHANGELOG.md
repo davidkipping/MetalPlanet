@@ -5,6 +5,41 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.10.5] — 2026-10-08
+
+Code-review round on 0.10.4.
+
+### Fixed
+- **fp64 on the default stream fell through to an exception in every
+  z-input entry point, quadratic included.** `flux_dev_metal` (quadratic,
+  `ld_basis`, hybrid) and `flux_dev_metal_hybrid` promised to fall back
+  to the graph for fp64, but MLX has no fp64 on Metal at all, so unless
+  the caller already sat in `mx.stream(mx.cpu)` the fallback raised
+  "float64 is not supported on the GPU". Pre-existing (0.10.3 raised the
+  same way; the tau entry points have re-routed fp64 since 0.8.2). Both
+  z entry points now put fp64 on the CPU stream themselves, as the tau
+  ones do. (0.10.4's bitwise fallback test passed only because it
+  supplied that stream.)
+- **One off-kernel expression, everywhere.** `hybrid.combine_cols` is
+  the sequential contraction `flux_dev_hybrid` always used, now called
+  by the z-kernel entry point's fallback *and* the tau graph, whose own
+  dot-product `_combine` (2.4e-7 from it in fp32 on the CPU stream) is
+  deleted. The fp64 tau graph moves by at most 7e-18 (hybrid-only; no
+  corpus array covers it).
+- A scalar radius with one set of weights given as a (1, n_w) row on
+  (m,) separations went down `_hybrid_dev`'s batched branch as m
+  single-point kernel rows (right answer, m-row launch); it is one
+  (1, m) row now, as the (n_w,) form always was.
+- `tests/test_api.py`'s repaired parity test is Metal-gated (it asserts
+  the kernel's cache key).
+
+### Tests
+- New: fp64 on the default stream for all five z-entry forms; the tau
+  graph's scalar call equals `combine_cols` over its own `ld_basis`
+  columns bitwise (fp64 and fp32 CPU stream, every law); the one-row
+  launch shape via a spy on the kernel core. 1176 green; corpus 296/296
+  bitwise; 18 kernel sources byte-identical.
+
 ## [0.10.4] — 2026-10-08
 
 Code-review round on 0.10.3.

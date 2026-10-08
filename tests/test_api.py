@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 import metalplanet
+from metalplanet.metal import metal_available
 
 
 def _params(**kw):
@@ -159,6 +160,7 @@ class TestEccentricKernelRouting:
             kw["use_metal"] = False
         return metalplanet.TransitModel(p, t, dtype=dtype, **kw), p
 
+    @pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
     @pytest.mark.parametrize("ecc", [1e-4, 0.3, 0.7, 0.9])
     def test_kernel_matches_graph_and_fp64(self, ecc):
         mk, p = self._model(ecc, mx.float32, kernel=True)

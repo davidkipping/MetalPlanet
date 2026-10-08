@@ -32,7 +32,7 @@ import mlx.core as mx
 import numpy as np
 
 from . import metal as M
-from .hybrid import get_law
+from .hybrid import combine_cols, get_law
 
 __all__ = ["flux_dev_from_tau_hybrid", "flux_dev_metal_hybrid"]
 
@@ -501,18 +501,6 @@ def _make_core(law, exp_time, mode, n_gl, n_sub, orbit, basis):
 # the graph path (fp64, CPU stream, no Metal): the same function
 # ---------------------------------------------------------------------------
 
-def _combine(B, w2d, law, lead_axes: int):
-    """(B @ c) / (N @ c) with c = (1, -w) per chain; B (..., ncol) whose
-    leading axis is the chain, w2d (n, n_w)."""
-    N = mx.array(law.norms(), dtype=B.dtype)
-    one = mx.ones((w2d.shape[0], 1), dtype=B.dtype)
-    c = mx.concatenate([one, -w2d], axis=1)               # (n, ncol)
-    num = mx.sum(B * mx.reshape(c, (c.shape[0],) + (1,) * lead_axes
-                                + (c.shape[1],)), axis=-1)
-    den = mx.sum(c * N, axis=1)
-    return num / mx.reshape(den, (-1,) + (1,) * lead_axes)
-
-
 def _tau_graph(tau, period, a, b, r, w2d, exp_time, mode, n_gl, n_sub,
                law, basis=False, k=None, h=None):
     """metal._tau_graph for a hybrid law: the MLX-graph equivalent of the
@@ -566,7 +554,9 @@ def _tau_graph(tau, period, a, b, r, w2d, exp_time, mode, n_gl, n_sub,
             B = mx.sum(inst(T, 2) * W[..., None], axis=-2)
     if basis:
         return B
-    return _combine(B, w2d, law, 1)
+    # the one off-kernel expression (hybrid.combine_cols): w2d (n, n_w)
+    # rows broadcast against B's (n, m) as flux_dev_hybrid's batched form
+    return combine_cols([B[..., k] for k in range(B.shape[-1])], w2d, law)
 
 
 # ---------------------------------------------------------------------------
@@ -768,13 +758,18 @@ def _z_core(law, basis: bool):
 def flux_dev_metal_hybrid(z, r, law, u, basis=False):
     """``metal.flux_dev_metal`` for a hybrid law: (n, m) or (m,) points,
     r per chain; F - 1, or with ``basis`` the z.shape + (1 + n_w,)
-    shape-basis columns."""
+    shape-basis columns. fp64 takes hybrid.py's graph on the CPU stream
+    (put there here, as flux_dev_from_tau does: MLX has no fp64 on Metal
+    at all, so without it the fallback would raise, not fall back)."""
     from .hybrid import flux_dev_hybrid, shape_cols
     law = get_law(law)
     if not isinstance(z, mx.array):
         z = mx.array(z)
     if z.ndim not in (1, 2):
         raise ValueError(f"z must be (m,) or (n, m); got {z.shape}")
+    if z.dtype == mx.float64 and M._gpu_stream_active():
+        with mx.stream(mx.cpu):
+            return flux_dev_metal_hybrid(z, r, law, u, basis=basis)
     squeeze = z.ndim == 1
     z2d = z[None, :] if squeeze else z
     n_param = r.shape[0] if isinstance(r, mx.array) and r.ndim >= 1 else 1
@@ -793,6 +788,6 @@ def flux_dev_metal_hybrid(z, r, law, u, basis=False):
     else:
         # hybrid.py's graph itself, so every route to this function --
         # fp64, the CPU stream, a Metal-less machine -- is one expression,
-        # bitwise (not _combine's dot product: 2.4e-7 apart in fp32)
+        # bitwise (0.10.3's dot-product contraction was 2.4e-7 apart)
         out = flux_dev_hybrid(z2d, rc[:, None], w2d, law)
     return out[0] if squeeze and n == 1 else out

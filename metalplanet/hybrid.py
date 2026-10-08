@@ -95,7 +95,7 @@ from .solution import _kite_sqarea
 
 __all__ = ["HybridLaw", "HYBRID2", "HYBRID4", "HYBRID5", "LAWS",
            "HYBRID2_EPS", "ladder", "get_law", "hybrid_norms", "w_to_c",
-           "shape_cols", "flux_dev_hybrid", "shape_partials",
+           "shape_cols", "flux_dev_hybrid", "combine_cols", "shape_partials",
            "even_cols", "pole_col", "lens_geometry"]
 
 _PI = math.pi
@@ -450,6 +450,17 @@ def flux_dev_hybrid(z: mx.array, r, w, law) -> mx.array:
     """
     law = get_law(law)
     cols, _, _ = _shape_terms(z, r, law)
+    return combine_cols(cols, w, law)
+
+
+def combine_cols(cols, w, law) -> mx.array:
+    """F - 1 from the shape columns: (E0 - sum_j w_j T_j) / (pi - sum_j
+    w_j N_j), as one sequential expression. ``cols`` is the list
+    [E0, T_1..T_n] (each any shape), ``w`` as flux_dev_hybrid takes it.
+    THE off-kernel expression: flux_dev_hybrid, the z-kernel entry point's
+    fallback and the fp64 tau graph all call it, so every route off the
+    kernels agrees bitwise."""
+    law = get_law(law)
     N = law.norms()
     if isinstance(w, mx.array):
         n = w.shape[-1] if w.ndim else 1
