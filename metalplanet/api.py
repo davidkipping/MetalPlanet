@@ -49,7 +49,7 @@ import mlx.core as mx
 import numpy as np
 
 from .flux import flux_dev
-from .metal import flux_dev_metal, metal_available
+from .metal import _gpu_stream_active, flux_dev_metal, metal_available
 from .metal_hybrid import flux_dev_metal_hybrid
 from .anchored import anchor_constants_ew, separation_anchored
 from .hybrid import LAWS as _HYBRID_LAWS, flux_dev_hybrid
@@ -345,50 +345,46 @@ class TransitModel:
     def _hybrid_dev(self, z, rp, uvec):
         """F - 1 for a hybrid law on separations ``z``: the fused z-input
         kernel (metal_hybrid) wherever it can run -- the role flux_dev_metal
-        plays for the quadratic law -- and the graph otherwise.
+        plays for the quadratic law -- and hybrid.py's graph otherwise.
 
-        Whether the kernel runs is decided where flux_dev_metal decides it:
-        inside the entry point, at trace time, from the active stream.
-        mx.compile keeps one trace per stream, so a graph first traced on
-        the CPU stream is retraced, kernel and all, on the GPU; no cache
-        key is needed. Only what cannot vary per call (dtype, use_metal, a
-        Metal device) is settled here, so an fp64 model keeps the pure
-        graph it had.
+        The decision is _kernel_usable's, taken here, inside the trace,
+        from the active stream (mx.compile keeps one trace per stream, so
+        a graph first traced on the CPU stream is retraced, kernel and
+        all, on the GPU; no cache key is needed). An fp32 model on the CPU
+        stream, a Metal-less machine and use_metal=False therefore run one
+        and the same graph, bitwise.
 
         The kernel takes (n, m) points with r and the weights per row, so
         the shapes are flattened onto that: one row for a single parameter
-        set (any node axes folded into m), n rows for light_curves' sets.
+        set (any node axes folded into m), n rows for light_curves' sets;
+        r goes through as is (the entry point takes a scalar, (n,) or
+        (n, 1)).
         """
         law = self.limb_dark
-        if (self.dtype != mx.float32 or not self.use_metal
-                or not metal_available()):
+        if not self._kernel_usable():
             return flux_dev_hybrid(z, rp, uvec, law)
         one_set = ((not isinstance(rp, mx.array) or rp.size == 1)
                    and uvec.ndim == 1)
         if one_set:
-            r = mx.reshape(rp, ()) if isinstance(rp, mx.array) else rp
-            out = flux_dev_metal_hybrid(mx.reshape(z, (-1,)), r, law, uvec)
-            return mx.reshape(out, z.shape)
-        n = z.shape[0]
-        w = mx.reshape(uvec, (n, -1)) if uvec.ndim >= 2 else uvec
-        r = mx.reshape(rp, (-1,)) if isinstance(rp, mx.array) else rp
-        out = flux_dev_metal_hybrid(mx.reshape(z, (n, -1)), r, law, w)
+            out = flux_dev_metal_hybrid(mx.reshape(z, (-1,)), rp, law, uvec)
+        else:
+            n = z.shape[0]
+            w = mx.reshape(uvec, (n, -1)) if uvec.ndim >= 2 else uvec
+            out = flux_dev_metal_hybrid(mx.reshape(z, (n, -1)), rp, law, w)
         return mx.reshape(out, z.shape)
 
     def _kernel_usable(self) -> bool:
-        """Can the fused *model* kernel run *here*: fp32, a usable Metal
-        device, the GPU stream active, and not switched off. Which model
-        graphs that kernel serves at all (primary transits, quadratic limb
-        darkening, no contact rule) is _get_compiled's business, decided
-        beside the branches it governs. The z-input kernels every other
-        fp32 graph reaches through _photom decide for themselves, at
-        trace time.
+        """Can a fused kernel run *here*: fp32, a usable Metal device, the
+        GPU stream active, and not switched off. Asked before tracing by
+        _get_compiled for the fused *model* kernel (whose reach -- primary
+        transits, quadratic limb darkening, no contact rule -- is stated
+        beside the branches it governs, and whose answer is in the cache
+        key), and inside the trace by _hybrid_dev for the hybrid z-kernel.
         """
         if not self.use_metal:
             return False
         if self.dtype != mx.float32:
             return False
-        from .metal import _gpu_stream_active, metal_available
         return metal_available() and _gpu_stream_active()
 
     def _get_compiled(self, circular: bool, ew: bool = False):

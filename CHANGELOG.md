@@ -5,6 +5,40 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.10.3] — 2026-10-08
+
+Code-review round on 0.10.2.
+
+### Changed
+- **`_hybrid_dev` falls back to hybrid.py's graph, not the entry point's
+  own.** The guard is now `_kernel_usable()` whole -- stream check
+  included, taken inside the trace -- so an fp32 model with Metal on,
+  run on the CPU stream, evaluates the same graph as `use_metal=False`
+  and a Metal-less machine, bitwise (0.10.2 let the guard pass and ran
+  `flux_dev_metal_hybrid`'s internal fallback: a different fp32
+  expression, 2.4e-7 apart). One predicate for both kernels; the
+  duplicated static checks and `_kernel_usable`'s local import are gone.
+- The radius goes to the kernel entry point as is: its canonicaliser
+  takes a float, 0-d, (n,) or (n, 1) (checked), so 0.10.2's two
+  `isinstance` reshapes -- where the float-radius bug lived -- are
+  deleted rather than patched.
+- The per-stream retrace that the design rests on is verified on the
+  dependency floor too: MLX 0.30.0 and 0.32.2 both retrace a graph
+  first traced on the CPU stream when it runs on the GPU, and three
+  streams (two GPU, one CPU) give three traces, so "one trace per
+  stream" is the right statement.
+
+### Tests
+- `test_fp32_light_curve_mx_gradients_through_the_kernel` asserts the
+  kernel route again (via the spy; 0.10.2 dropped the key check without
+  a replacement). The float-radius test is Metal-gated and spies the
+  route, so it cannot pass vacuously. New: the CPU-stream fallback is
+  the `use_metal=False` graph bitwise, both sides on the CPU stream
+  (the same graph rounds differently on the two devices). The
+  CPU-stream-first test sees the GPU trace alone now (the CPU trace
+  never calls the entry point). 1156 green; corpus 296/296 bitwise;
+  18 kernel sources byte-identical; 2e6-point fp32 timings unchanged.
+
 ## [0.10.2] — 2026-10-08
 
 Code-review round on 0.10.1. Its headline finding -- that the quadratic

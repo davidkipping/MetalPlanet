@@ -171,9 +171,9 @@ def test_fp32_light_curves_match_the_loop(law, mode):
 def test_a_cpu_stream_first_call_does_not_pin_the_graph(mode):
     """The v0.9.2 trap does not apply to a z-kernel: its decision is made
     inside the trace, and mx.compile keeps one trace per stream, so the
-    graph first traced on the CPU stream (graph photometry) is retraced
-    on the GPU with the kernel. One cache key, two traces, two outcomes;
-    the spy sees the stream each trace saw."""
+    graph first traced on the CPU stream (hybrid.py's graph, the entry
+    point never called) is retraced on the GPU with the kernel. One cache
+    key, two traces, two outcomes; the spy sees the GPU trace alone."""
     law = "hybrid5"
     m = metalplanet.TransitModel(params(law), T, dtype=mx.float32,
                                  **MODES[mode])
@@ -182,20 +182,46 @@ def test_a_cpu_stream_first_call_does_not_pin_the_graph(mode):
             a = m.light_curve(params(law))
         b = m.light_curve(params(law))
         m.light_curve(params(law))
-    assert calls == [False, True]
+    assert calls == [True]
     assert list(m._compiled) == [(True, False)]
     assert np.abs(a - b).max() < 1e-6
 
 
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
 def test_float_radius_with_per_set_weights_takes_the_kernel_path():
-    """_hybrid_dev's batched branch must not reshape a Python float."""
+    """_hybrid_dev's batched branch passes a Python-float radius to the
+    kernel as is (0.10.2 reshaped it; mx.reshape rejects floats)."""
     m = metalplanet.TransitModel(params("hybrid5"), T, dtype=mx.float32)
     z = mx.array(np.linspace(0.5, 1.2, 8, dtype=np.float32)).reshape(2, 4)
     w = mx.array(np.array([WEIGHTS["hybrid5"]] * 2, np.float32))
-    out = m._hybrid_dev(z, 0.1, w)
+    with kernel_spy() as calls:
+        out = m._hybrid_dev(z, 0.1, w)
+        mx.eval(out)
+    assert calls == [True]
     ref = flux_dev_hybrid(z, 0.1, w, "hybrid5")
     assert out.shape == (2, 4)
     assert np.abs(np.asarray(out - ref, np.float64)).max() < 1e-6
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+@pytest.mark.parametrize("law", NAMES)
+@pytest.mark.parametrize("mode", ["plain", "contact"])
+def test_fp32_cpu_stream_fallback_is_the_graph_bitwise(law, mode):
+    """An fp32 model with Metal on, run on the CPU stream, falls back to
+    hybrid.py's graph -- the very graph use_metal=False runs -- not to
+    the kernel entry point's own fallback (0.10.2: 2.4e-7 apart). Both
+    sides on the CPU stream: the same graph rounds differently on the two
+    devices, and that is not what is under test."""
+    p = params(law)
+    m = metalplanet.TransitModel(p, T, dtype=mx.float32, **MODES[mode])
+    g = metalplanet.TransitModel(p, T, dtype=mx.float32, use_metal=False,
+                                 **MODES[mode])
+    with kernel_spy() as calls:
+        with mx.stream(mx.cpu):
+            a = m.light_curve(p)
+            b = g.light_curve(p)
+    assert calls == []
+    assert np.array_equal(a, b)
 
 
 @pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
@@ -217,10 +243,12 @@ def test_fp32_light_curve_mx_gradients_through_the_kernel(law):
                 return mx.sum(c * m.light_curve_mx(
                     params(law, u=w, rp=rp, a=a, inc=inc)))
 
-            g = mx.grad(loss, argnums=(0, 1, 2, 3))(
-                *[mx.array(v, dtype=dtype) for v in (RP, A, INC)],
-                mx.array(w0, dtype=dtype))
-            mx.eval(g)
+            with kernel_spy() as calls:
+                g = mx.grad(loss, argnums=(0, 1, 2, 3))(
+                    *[mx.array(v, dtype=dtype) for v in (RP, A, INC)],
+                    mx.array(w0, dtype=dtype))
+                mx.eval(g)
+        assert calls == ([True] if dtype == mx.float32 else [])
         return np.concatenate([np.atleast_1d(np.asarray(x, np.float64))
                                for x in g])
 
