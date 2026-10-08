@@ -569,11 +569,9 @@ def _canon_w(u, n, n_w, dtype, name):
     # float64 numpy array without a dtype rounds it through fp32 first
     w = u if isinstance(u, mx.array) else mx.array(
         np.asarray(u, dtype=np.float64), dtype=dtype)
-    if w.dtype != dtype:
-        # before any GPU op on it: an fp64 array cannot even be broadcast
-        # there (0.10.5 cast last, after the broadcast, and so raised)
-        with mx.stream(mx.cpu):
-            w = w.astype(dtype)
+    # before any GPU op on it: an fp64 array cannot even be broadcast
+    # there (0.10.5 cast last, after the broadcast, and so raised)
+    w = M._as_dtype(w, dtype)
     if w.ndim == 1:
         if w.shape[0] != n_w:
             raise ValueError(f"{name} takes {n_w} weights; got {w.shape[0]}")
@@ -603,8 +601,7 @@ def flux_dev_from_tau_hybrid(tau, period, a, b, r, law, u, exp_time, mode,
     if not basis and isinstance(u, mx.array) and u.ndim == 2:
         n_param = max(n_param, u.shape[0])
     n = max(tau2d.shape[0], n_param)
-    pc = [M._canon_param(p, n, tau2d.dtype).astype(tau2d.dtype)
-          for p in params]
+    pc = [M._canon_param(p, n, tau2d.dtype) for p in params]
     if tau2d.shape[0] != n:
         tau2d = mx.broadcast_to(tau2d, (n, tau2d.shape[1]))
     per_c, a_c, b_c, r_c = pc[:4]
@@ -765,7 +762,7 @@ def flux_dev_metal_hybrid(z, r, law, u, basis=False):
     if not basis and isinstance(u, mx.array) and u.ndim == 2:
         n_param = max(n_param, u.shape[0])
     n = max(z2d.shape[0], n_param)
-    rc = M._canon_param(r, n, z.dtype).astype(z.dtype)
+    rc = M._canon_param(r, n, z.dtype)
     if z2d.shape[0] != n:
         z2d = mx.broadcast_to(z2d, (n, z2d.shape[1]))
     w2d = None if basis else _canon_w(u, n, law.n_w, z.dtype, law.name)

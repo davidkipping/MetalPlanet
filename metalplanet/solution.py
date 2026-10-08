@@ -57,6 +57,7 @@ import math
 import mlx.core as mx
 
 from .ellip import cel3, dtype_eps
+from .dtypes import fp64_on_cpu
 
 __all__ = ["sn_dev", "sn_dev_with_aux"]
 
@@ -80,12 +81,14 @@ def _kite_sqarea(z, r):
     return (a + (b + c)) * (c - (a - b)) * (c + (a - b)) * (a + (b - c))
 
 
+@fp64_on_cpu(any_arg=True)
 def sn_dev(z: mx.array, r) -> tuple[mx.array, mx.array, mx.array]:
     """(s0 - pi, s1 - 2 pi/3, s2) broadcast over z and r."""
     s0d, s1d, s2d, _ = sn_dev_with_aux(z, r)
     return s0d, s1d, s2d
 
 
+@fp64_on_cpu(any_arg=True)
 def sn_dev_with_aux(z: mx.array, r):
     """Solution-vector deviations plus the auxiliary quantities the
     analytic VJP reuses (masks, kappas, kite area, elliptic integrals).

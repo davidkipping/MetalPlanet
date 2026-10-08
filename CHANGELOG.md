@@ -5,6 +5,69 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.10.7] — 2026-10-08
+
+Code-review round on 0.10.6, plus a sweep of every public entry point
+under every calling form, which the review rounds had been finding one
+form at a time.
+
+### Corrected
+- **0.10.6 overclaimed the fp64-parameter fix.** It fixed the forward
+  pass only. `mx.grad` with respect to an fp64 parameter still raises
+  from the GPU default stream, and no library change can fix that: MLX's
+  transform machinery runs float64 ops on the default stream even when
+  the differentiated function runs wholly on the CPU stream (verified;
+  a cast with its own CPU-stream backward pass, the review's proposed
+  root fix, raises too). The supported form -- the `mx.grad` call under
+  `mx.stream(mx.cpu)` -- is now stated in `metalplanet.dtypes`, the entry
+  points' docstrings and the README, and pinned by a test.
+
+### Fixed
+- **Calling with the data by keyword raised** (`flux_dev_metal(z=...)`,
+  `flux_dev_metal_hybrid(z=...)`): 0.10.6's decorator took the data
+  positionally only. It now accepts the first parameter by its own name;
+  a missing one is a clear TypeError.
+- **The quadratic z entry's graph route skipped the parameter cast**:
+  an fp64 r with fp32 z raised on the GPU (3-D z, or no Metal) and gave
+  an fp64 result on the CPU stream, against the rule. Parameters are cast
+  before the route is chosen.
+- **float16 / integer data**: numpy float16 was fp64 but an mx float16
+  or int array raised. One rule for every container: float32 stays
+  float32, anything else is float64 (cast on the CPU stream).
+- **The public graph functions** -- `flux_dev`, `light_curve`,
+  `flux_dev_poly`, `sn_dev_poly`, `flux_dev_hybrid`, `shape_cols`,
+  `sn_dev`, `sn_dev_with_aux`, `flux_dev_analytic`, `ld_basis_analytic`
+  -- raised opaque errors ("'list' object has no attribute 'dtype'",
+  "unsupported dtype for cel") on numpy or list data, and "float64 is not
+  supported on the GPU" on fp64 data or parameters on the default stream.
+  They now follow the same data rule and go to the CPU stream for fp64
+  themselves, keeping MLX broadcasting and promotion for parameters. Only
+  calls that raised before change: everything that worked runs as it did
+  (corpus bitwise).
+- **`flux_dev_analytic`'s backward pass crashed with Python-float
+  coefficients** (`.shape` on a float) -- reached by `flux_dev_metal`'s
+  fp64 route under `mx.grad`. Pre-existing; the VJPs take a float
+  primal's shape as ().
+- `combine_cols` checks the column count against the law (a quadratic
+  basis with hybrid2 weights silently gave a wrong answer).
+- The `tau` docstring 0.10.6 split mid-sentence is whole again; dead
+  `.astype` calls after `_canon_param` removed; a non-fp64 dtype mismatch
+  is cast on the active stream, the CPU round trip kept for fp64 only.
+
+### Changed
+- The contract lives in one module, `metalplanet/dtypes.py`
+  (`as_data`, `fp64_on_cpu`, still re-exported from `metal`), shared by
+  the kernel entry points and the graph functions.
+
+### Tests
+- New `tests/test_entry_contract.py`: 20 entry points (12 kernel forms,
+  8 graph functions) x call forms, eight data containers, parameter
+  dtypes on both streams, (m,) and (n, m) layouts, `mx.grad` in fp32 and
+  fp64, `mx.compile`, with spies asserting the kernel ran; plus
+  `TransitModel` across six `t` containers x three dtypes and keyword
+  calls. 375 cases. 1571 green (1 slow green); corpus 296/296 bitwise;
+  18 kernel sources byte-identical; timings unchanged.
+
 ## [0.10.6] — 2026-10-08
 
 Code-review round on 0.10.5. The two substantive findings were

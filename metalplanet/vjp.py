@@ -31,6 +31,7 @@ import math
 
 import mlx.core as mx
 
+from .dtypes import fp64_on_cpu
 from .solution import sn_dev_with_aux
 
 __all__ = ["flux_dev_analytic", "ld_basis_analytic", "sn_partials"]
@@ -104,7 +105,7 @@ def sn_partials(z: mx.array, r, aux):
 
 
 @mx.custom_function
-def flux_dev_analytic(z: mx.array, r: mx.array, u1: mx.array,
+def _flux_dev_analytic_cf(z: mx.array, r: mx.array, u1: mx.array,
                       u2: mx.array) -> mx.array:
     """flux_dev with an analytic backward pass. Same contract as
     flux.flux_dev; inputs must be mx.arrays (broadcastable)."""
@@ -116,7 +117,7 @@ def flux_dev_analytic(z: mx.array, r: mx.array, u1: mx.array,
     return (g0 * s0d + g1 * s1d + g2 * s2d) / norm
 
 
-@flux_dev_analytic.vjp
+@_flux_dev_analytic_cf.vjp
 def _flux_dev_vjp(primals, cotangent, output):
     z, r, u1, u2 = primals
     ct = cotangent if isinstance(cotangent, mx.array) else cotangent[0]
@@ -139,15 +140,15 @@ def _flux_dev_vjp(primals, cotangent, output):
         + fdev * (_PI / 6.0) * inv_norm
 
     return (
-        _unbroadcast(ct * dfdz, z.shape),
-        _unbroadcast(ct * dfdr, r.shape),
-        _unbroadcast(ct * dfdu1, u1.shape),
-        _unbroadcast(ct * dfdu2, u2.shape),
+        _unbroadcast(ct * dfdz, _shape(z)),
+        _unbroadcast(ct * dfdr, _shape(r)),
+        _unbroadcast(ct * dfdu1, _shape(u1)),
+        _unbroadcast(ct * dfdu2, _shape(u2)),
     )
 
 
 @mx.custom_function
-def ld_basis_analytic(z: mx.array, r: mx.array) -> mx.array:
+def _ld_basis_analytic_cf(z: mx.array, r: mx.array) -> mx.array:
     """The limb-darkening basis: (..., 3) flux deficits B_j for a star of
     intensity mu^j, j = 0, 1, 2, unnormalised.
 
@@ -164,7 +165,7 @@ def ld_basis_analytic(z: mx.array, r: mx.array) -> mx.array:
     return mx.stack([s0d, s1d, 0.5 * s0d + 0.25 * s2d], axis=-1)
 
 
-@ld_basis_analytic.vjp
+@_ld_basis_analytic_cf.vjp
 def _ld_basis_vjp(primals, cotangent, output):
     z, r = primals
     ct = cotangent if isinstance(cotangent, mx.array) else cotangent[0]
@@ -175,6 +176,32 @@ def _ld_basis_vjp(primals, cotangent, output):
     w1 = ct[..., 1]
     w2 = 0.25 * ct[..., 2]
     return (
-        _unbroadcast(w0 * ds0dz + w1 * ds1dz + w2 * ds2dz, z.shape),
-        _unbroadcast(w0 * ds0dr + w1 * ds1dr + w2 * ds2dr, r.shape),
+        _unbroadcast(w0 * ds0dz + w1 * ds1dz + w2 * ds2dz, _shape(z)),
+        _unbroadcast(w0 * ds0dr + w1 * ds1dr + w2 * ds2dr, _shape(r)),
     )
+
+
+def _shape(x):
+    """A primal's shape for _unbroadcast; a Python number (a parameter
+    passed as a plain float) is a scalar -- MLX takes any cotangent for
+    it and discards it. (Before 0.10.7, ``.shape`` on a float crashed the
+    backward pass of a gradient taken with float coefficients.)"""
+    return x.shape if isinstance(x, mx.array) else ()
+
+
+# The public graph entries: the custom functions above, behind the data
+# contract (metalplanet.dtypes). Calls that already worked run unchanged.
+
+@fp64_on_cpu(any_arg=True)
+def flux_dev_analytic(z, r, u1, u2) -> mx.array:
+    """flux_dev with an analytic backward pass. Same contract as
+    flux.flux_dev: z any array-like (float32 stays float32, anything else
+    is float64), parameters broadcastable and promoted as MLX does."""
+    return _flux_dev_analytic_cf(z, r, u1, u2)
+
+
+@fp64_on_cpu(any_arg=True)
+def ld_basis_analytic(z, r) -> mx.array:
+    """The quadratic limb-darkening basis, (..., 3), with an analytic
+    backward pass; see _ld_basis_analytic_cf."""
+    return _ld_basis_analytic_cf(z, r)

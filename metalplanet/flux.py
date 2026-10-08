@@ -15,6 +15,7 @@ import mlx.core as mx
 
 from .greens import quad_g_coeffs
 from .solution import sn_dev
+from .dtypes import fp64_on_cpu
 
 __all__ = ["flux_dev", "light_curve"]
 
@@ -22,6 +23,7 @@ _PI = math.pi
 _TWO_PI_3 = 2.0 * math.pi / 3.0
 
 
+@fp64_on_cpu(any_arg=True)
 def flux_dev(z: mx.array, r, u1, u2) -> mx.array:
     """F - 1 for a quadratic limb-darkened transit at separation(s) z.
 
@@ -38,6 +40,7 @@ def flux_dev(z: mx.array, r, u1, u2) -> mx.array:
     return (g0 * s0d + g1 * s1d + g2 * s2d) / norm
 
 
+@fp64_on_cpu(any_arg=True)
 def light_curve(z: mx.array, r, u1, u2) -> mx.array:
     """Absolute flux (1 out of transit) — standalone convenience."""
     return 1.0 + flux_dev(z, r, u1, u2)

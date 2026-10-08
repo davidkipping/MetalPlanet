@@ -92,6 +92,7 @@ import numpy as np
 
 from .ellip import dtype_eps
 from .solution import _kite_sqarea
+from .dtypes import fp64_on_cpu
 
 __all__ = ["HybridLaw", "HYBRID2", "HYBRID4", "HYBRID5", "LAWS",
            "HYBRID2_EPS", "ladder", "get_law", "hybrid_norms", "w_to_c",
@@ -425,6 +426,7 @@ def _shape_terms(z, r, law):
     return cols, dz, dr
 
 
+@fp64_on_cpu(any_arg=True)
 def shape_cols(z: mx.array, r, law) -> mx.array:
     """The shape-basis columns B = [E0, T_1..T_n], stacked on a trailing
     axis: shape z.shape + (1 + n_w,). Deviation form; 0 out of transit."""
@@ -439,6 +441,7 @@ def shape_partials(z: mx.array, r, law):
     return mx.stack(dz, axis=-1), mx.stack(dr, axis=-1)
 
 
+@fp64_on_cpu(any_arg=True)
 def flux_dev_hybrid(z: mx.array, r, w, law) -> mx.array:
     """F - 1 for a hybrid law with shape weights ``w``.
 
@@ -462,6 +465,12 @@ def combine_cols(cols, w, law) -> mx.array:
     fallback and the fp64 tau graph all call it, so every route off the
     kernels agrees bitwise."""
     law = get_law(law)
+    n_col = (cols.shape[-1] if isinstance(cols, mx.array) and cols.ndim
+             else len(cols))
+    if n_col != 1 + law.n_w:
+        raise ValueError(f"{law.name} has {1 + law.n_w} shape columns "
+                         f"[E0, T_1..T_{law.n_w}]; got {n_col} (another "
+                         "law's basis?)")
     if isinstance(cols, mx.array):
         cols = [cols[..., j] for j in range(cols.shape[-1])]
     N = law.norms()

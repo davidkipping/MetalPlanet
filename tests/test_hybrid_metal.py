@@ -22,6 +22,7 @@ import mlx.core as mx
 import pytest
 
 import metalplanet
+from metalplanet import metal as M
 from metalplanet import ld
 from metalplanet.hybrid import LAWS, hybrid_norms
 from metalplanet.metal import flux_dev_from_tau, flux_dev_metal, metal_available
@@ -567,14 +568,17 @@ def _entries(z, tau, r, u1, w):
     }
 
 
-@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+@pytest.mark.skipif(not (metal_available() and M._gpu_stream_active()),
+                    reason="the kernels need Metal and the GPU stream")
 @pytest.mark.parametrize("entry", ["z-quadratic", "z-ld_basis", "z-hybrid",
                                    "tau-quadratic", "tau-hybrid"])
 def test_fp64_parameters_with_fp32_data_take_the_kernel(entry):
     """An fp64 mx.array radius / coefficient / weight vector alongside
     fp32 data is cast to fp32 (on the CPU stream) and the kernel runs;
     before 0.10.6 every kernel entry point raised MLX's GPU error. Equal
-    to the all-fp32 call to an fp32 ulp."""
+    to the all-fp32 call to an fp32 ulp. Forward only: that the kernel
+    ran is asserted by spies, and the gradient's supported form pinned,
+    in test_entry_contract.py."""
     f64 = lambda v: mx.array(v, dtype=mx.float64)
     f32 = lambda v: mx.array(v, dtype=mx.float32)
     z, tau = f32(Z), f32(TAU)

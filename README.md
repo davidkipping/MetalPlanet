@@ -167,13 +167,25 @@ with mx.stream(mx.cpu):
 - Under `mx.grad`, MLX needs the CPU stream for any float64 input. With
   an fp32 GPU model, differentiate float32 fields there; for an absolute
   t0 (which must be fp64), take the gradient under `mx.stream(mx.cpu)`.
-- The dtype of the data is the dtype of the computation, on every entry
-  point (`flux_dev_from_tau`, `flux_dev_metal`): an fp32 mx.array of
-  tau or z takes the fused kernel; fp64 -- an fp64 mx.array, a float64
-  numpy array, a Python list -- takes the exact graph on the CPU stream,
-  put there for you. A parameter array of the other dtype is cast to the
-  data's. So hand the kernels `mx.array(x, dtype=mx.float32)`: a numpy
-  float64 array is not silently demoted (MLX's own `mx.array()` would).
+- The dtype of the data is the dtype of the computation, on every
+  function that takes z or tau. float32 data, in any container, takes
+  the fused kernels; anything else -- float64, a numpy float64 array, a
+  Python list, float16, integers -- is float64 and takes the exact graph
+  on the CPU stream, put there for you. So hand the kernels
+  `mx.array(x, dtype=mx.float32)`: a numpy float64 array is not silently
+  demoted (MLX's own `mx.array()` would). The data may be passed
+  positionally or by name.
+- Parameters: the kernel entry points (`flux_dev_from_tau`,
+  `flux_dev_metal`) cast a parameter array of another dtype to the
+  data's and take one parameter value per row of (n, m) data. The graph
+  functions (`flux_dev`, `flux_dev_hybrid`, `shape_cols`, ...) keep MLX
+  semantics: broadcasting, so (n, m) data takes r as (n, 1), and type
+  promotion, so an fp64 parameter gives an fp64 result.
+- A gradient with respect to a float64 parameter needs the `mx.grad`
+  call itself under `mx.stream(mx.cpu)`, even with fp32 data: MLX's
+  transform machinery runs float64 ops on the default stream, which no
+  library function can redirect. `tests/test_entry_contract.py` holds
+  every entry point under every calling form.
 
 ## The batching rule (read this before writing a sampler)
 

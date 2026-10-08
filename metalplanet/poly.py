@@ -47,12 +47,14 @@ import mlx.core as mx
 
 from .greens import greens_affine, greens_transform_np
 from .solution import _kite_sqarea, sn_dev_with_aux
+from .dtypes import fp64_on_cpu
 
 __all__ = ["sn_dev_poly", "flux_dev_poly", "poly_norm"]
 
 _PI = math.pi
 
 
+@fp64_on_cpu(any_arg=True)
 def sn_dev_poly(z: mx.array, r, n_max: int) -> list:
     """[s_0 - pi, s_1 - 2 pi/3, s_2, s_3, ..., s_n_max], broadcast over
     z and r. Every element is zero out of transit."""
@@ -125,6 +127,7 @@ def poly_norm(u) -> float:
     return float(_PI * (g[0] + 2.0 * g[1] / 3.0))
 
 
+@fp64_on_cpu(any_arg=True)
 def flux_dev_poly(z: mx.array, r, u, n_max: int | None = None) -> mx.array:
     """F - 1 for an arbitrary-order polynomial law.
 

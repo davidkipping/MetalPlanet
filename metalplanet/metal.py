@@ -39,11 +39,13 @@ anvil's CPU data generation rely on this).
 from __future__ import annotations
 
 import functools
+import inspect
 import math
 
 import mlx.core as mx
 import numpy as np
 
+from .dtypes import _as_dtype, _gpu_stream_active, as_data, fp64_on_cpu
 from .vjp import _unbroadcast, flux_dev_analytic
 
 __all__ = ["flux_dev_metal", "flux_dev_from_tau", "metal_available",
@@ -1258,55 +1260,15 @@ def metal_available() -> bool:
     return _metal_ok
 
 
-def as_data(x) -> mx.array:
-    """A data array (z or tau) as an mx.array in its own precision: an
-    mx.array as is; anything else through numpy, float32 staying float32
-    and everything else (float64, ints, Python floats) float64. The dtype
-    of the data is the dtype of the computation -- mx.array() alone would
-    silently take a float64 numpy array to float32."""
-    if isinstance(x, mx.array):
-        return x
-    a = np.asarray(x)
-    return mx.array(a, dtype=mx.float32 if a.dtype == np.float32
-                    else mx.float64)
-
-
-def fp64_on_cpu(fn):
-    """Entry-point decorator: the first argument is the data array (z or
-    tau). It is converted by ``as_data``, and when it is float64 on the
-    GPU stream the call runs on the CPU stream. MLX has no float64 on
-    Metal *at all* -- even a slice raises -- so fp64 is not a dispatch
-    choice but a device one, and this is what makes "fp64 falls back to
-    the graph" true rather than an exception the caller has to pre-empt;
-    TransitModel does the same (api.py: _stream). One mechanism for every
-    kernel entry point (0.10.6; four hand-copied re-routes before)."""
-    @functools.wraps(fn)
-    def wrapped(data, *args, **kwargs):
-        data = as_data(data)
-        if data.dtype == mx.float64 and _gpu_stream_active():
-            with mx.stream(mx.cpu):
-                return fn(data, *args, **kwargs)
-        return fn(data, *args, **kwargs)
-    return wrapped
-
-
-def _gpu_stream_active() -> bool:
-    try:
-        return mx.default_device() == mx.Device(mx.DeviceType.gpu)
-    except Exception:
-        return False
-
 
 def _canon_param(p, n, dtype):
-    """Parameter -> (n,) array of the data's dtype (accepts scalar, 0-d,
-    (n,), (n,1), (1,1)). An mx.array parameter of another dtype -- an fp64
-    radius with fp32 data, say -- is cast first, on the CPU stream, where
-    fp64 may live; the data's dtype is the computation's."""
+    """Parameter -> (n,) array of the data's dtype (accepts a scalar or
+    anything of size n or 1). An mx.array parameter of another dtype --
+    an fp64 radius with fp32 data, say -- is cast first (``_as_dtype``);
+    the data's dtype is the computation's."""
     if not isinstance(p, mx.array):
         return mx.full((n,), float(p), dtype=dtype)
-    if p.dtype != dtype:
-        with mx.stream(mx.cpu):
-            p = p.astype(dtype)
+    p = _as_dtype(p, dtype)
     if p.ndim == 0:
         return mx.broadcast_to(mx.reshape(p, (1,)), (n,))
     q = mx.reshape(p, (-1,))
@@ -1375,7 +1337,7 @@ def _ld_basis_metal(z, r):
     z2d = z[None, :] if squeeze else z
     n_param = r.shape[0] if isinstance(r, mx.array) and r.ndim >= 1 else 1
     n = max(z2d.shape[0], n_param)
-    rc = _canon_param(r, n, z.dtype).astype(z.dtype)
+    rc = _canon_param(r, n, z.dtype)
     if z2d.shape[0] != n:
         z2d = mx.broadcast_to(z2d, (n, z2d.shape[1]))
     if (z.dtype == mx.float32 and _gpu_stream_active()
@@ -1394,11 +1356,13 @@ def flux_dev_metal(z: mx.array, r, u1=None, u2=None, *,
     falls back to flux_dev_analytic for fp64, CPU streams, unsupported
     layouts, or machines where the kernel probe fails.
 
-    The dtype of ``z`` is the dtype of the computation: an fp32 mx.array
-    takes the kernel; fp64 (an fp64 mx.array, or a float64 numpy array or
-    Python sequence) takes the graph on the CPU stream, put there here
-    (MLX has no fp64 on Metal at all). An mx.array parameter of the other
-    dtype is cast to z's, on the CPU stream.
+    The dtype of ``z`` is the dtype of the computation: float32 takes the
+    kernel; anything else (float64, a numpy float64 array, a Python
+    sequence, float16, integers) is float64 and takes the graph on the CPU
+    stream, put there here (MLX has no fp64 on Metal at all). A parameter
+    array of another dtype is cast to z's, on every route. For ``mx.grad``
+    with respect to a float64 parameter, make the ``mx.grad`` call itself
+    under ``mx.stream(mx.cpu)`` (an MLX rule; see ``fp64_on_cpu``).
 
     With ``ld_basis=True`` it returns the limb-darkening basis instead:
     shape ``z.shape + (3,)`` (with ``z`` broadcast over per-chain ``r``),
@@ -1426,6 +1390,10 @@ def flux_dev_metal(z: mx.array, r, u1=None, u2=None, *,
         return _ld_basis_metal(z, r)
     if u1 is None or u2 is None:
         raise ValueError("u1 and u2 are required unless ld_basis=True")
+    # the data's dtype is the computation's on the graph route too (0.10.6
+    # handed it an fp64 r as is: an exception on the GPU, an fp64 result
+    # on the CPU stream)
+    r, u1, u2 = (_as_dtype(p, z.dtype) for p in (r, u1, u2))
     if (z.dtype != mx.float32 or z.ndim not in (1, 2)
             or not _gpu_stream_active() or not metal_available()):
         return flux_dev_analytic(z, r, u1, u2)
@@ -1628,13 +1596,15 @@ def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1=None, u2=None, *,
     and in every gradient grid.
 
     Args:
-        tau: (n, m) or (m,) times since each point's own mid-transit.
-            Its dtype is the computation's: an fp32 mx.array takes the
-            kernel; fp64 -- an fp64 mx.array, a float64 numpy array, a
-            Python sequence -- takes the graph on the CPU stream (put
-            there here; MLX has no fp64 on Metal). An mx.array parameter
-            of the other dtype is cast to tau's on the CPU stream.
+        tau: (n, m) or (m,) times since each point's own mid-transit
             (inferior conjunction), in the same units as ``period``.
+            Its dtype is the computation's: float32 takes the kernel;
+            anything else -- float64, a numpy float64 array, a Python
+            sequence, float16, integers -- is float64 and takes the graph
+            on the CPU stream (put there here; MLX has no fp64 on Metal).
+            A parameter array of another dtype is cast to tau's. For
+            ``mx.grad`` with respect to a float64 parameter, make the
+            ``mx.grad`` call itself under ``mx.stream(mx.cpu)`` (MLX).
             Expected to lie within half a period of it -- that is what "its
             own" means.
         period, a, b, r, u1, u2: scalars or (n,), broadcast per chain as
@@ -1746,10 +1716,8 @@ def _flux_dev_from_tau_impl(tau, period, a, b, r, u1, u2, exp_time, mode,
     n_param = max((p.shape[0] if isinstance(p, mx.array) and p.ndim >= 1
                    else 1) for p in params)
     n = max(tau2d.shape[0], n_param)
-    # a parameter carrying a different float width than tau would reach
-    # the kernel as a mismatched input; tau sets the precision
-    pc = [_canon_param(p, n, tau2d.dtype).astype(tau2d.dtype)
-          for p in params]
+    # tau sets the precision; _canon_param casts any other width
+    pc = [_canon_param(p, n, tau2d.dtype) for p in params]
     if tau2d.shape[0] != n:
         tau2d = mx.broadcast_to(tau2d, (n, tau2d.shape[1]))
 
