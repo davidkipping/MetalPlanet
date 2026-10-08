@@ -37,8 +37,20 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
   ties z == r and z == 1, where autodiff splits the gradient and the
   analytic partials are the ones that match FD). fp32 stays within 1e-6
   of fp64 at every simplex vertex. 90 tests (`tests/test_hybrid.py`).
-  Nothing user-facing changes yet: `TransitModel` and the kernels follow
-  in stages 2 and 3. Existing paths bitwise unchanged (296 arrays).
+  Existing paths bitwise unchanged (296 arrays).
+- **Hybrid limb-darkening laws, stage 2 of 3: `TransitModel`.**
+  `limb_dark="hybrid2" | "hybrid4" | "hybrid5"` with `params.u` the shape
+  weights (2, 4 or 5 of them), on every frontend path: `light_curve`,
+  `light_curves` (sequence and array-valued, per-set weights), the
+  contact and supersample rules, eccentric orbits, and `light_curve_mx`
+  differentiable in each weight (FD to 1e-6; the every-field gradient
+  test now runs over the three laws). Secondary eclipses ignore limb
+  darkening as before. The laws use the polynomial law's vector-law
+  plumbing: `_n_poly` is `_n_vec`, the graph branches read `vec`, and the
+  one law-specific line is the dispatch in `_photom`. They run on the
+  MLX graph (fp32 within 2e-6 of fp64), never the fused kernel, as the
+  polynomial law does. 34 tests (`tests/test_hybrid_api.py`); existing
+  paths bitwise unchanged (296 arrays). The kernels follow in stage 3.
 
 ## [0.9.7] — 2026-10-04
 

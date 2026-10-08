@@ -24,11 +24,13 @@ Differences from batman, by design:
   ALFM19 formulation (float64 accuracy ~1e-13; batman's quadratic path
   carries a ~2e-8 floor from its Hastings E/K approximations), and the
   whole computation is an MLX graph — differentiable and GPU-capable;
-* supported limb_dark: "uniform", "linear", "quadratic", and
-  "polynomial" for I(mu)/I0 = 1 - sum_n u_n (1-mu)^n at ANY order
-  (ALFM19's M_n recursion, metalplanet/poly.py); batman's
-  non-polynomial laws ("nonlinear", "squareroot", ...) are not
-  covered by this formulation;
+* supported limb_dark: "uniform", "linear", "quadratic", "polynomial"
+  for I(mu)/I0 = 1 - sum_n u_n (1-mu)^n at ANY order (ALFM19's M_n
+  recursion, metalplanet/poly.py), and the hybrid laws "hybrid2",
+  "hybrid4", "hybrid5" (even powers of mu plus double poles, elementary
+  and more accurate than quadratic; metalplanet/hybrid.py), whose ``u``
+  holds the shape-basis weights w; batman's non-polynomial laws
+  ("nonlinear", "squareroot", ...) are not covered by this formulation;
 * no error-tolerance machinery (`max_err`, `fac`, `nthreads`): the model
   is closed-form, there is no integration error to budget.
 
@@ -49,6 +51,7 @@ import numpy as np
 from .flux import flux_dev
 from .metal import flux_dev_metal
 from .anchored import anchor_constants_ew, separation_anchored
+from .hybrid import LAWS as _HYBRID_LAWS, flux_dev_hybrid
 from .poly import flux_dev_poly
 from .exposure import (contact_geometry, contact_offsets,
                        contact_offsets_anchored, exposure_nodes)
@@ -57,7 +60,13 @@ from .trig import sincos
 
 __all__ = ["TransitParams", "TransitModel"]
 
-_SUPPORTED_LD = ("uniform", "linear", "quadratic", "polynomial")
+_SUPPORTED_LD = ("uniform", "linear", "quadratic", "polynomial",
+                 "hybrid2", "hybrid4", "hybrid5")
+#: laws whose coefficients enter the graph as one vector (uvec) rather
+#: than as (u1, u2): the polynomial law at any order, and the hybrid laws
+#: at their fixed count of shape weights
+_VECTOR_LAWS = {"polynomial": None,
+                **{n: law.n_w for n, law in _HYBRID_LAWS.items()}}
 
 
 class TransitParams:
@@ -151,6 +160,11 @@ def _ld_coeffs(params, conv=float, u=None) -> tuple[float, float]:
             raise ValueError("polynomial limb darkening needs >= 1 "
                              "coefficient (use 'uniform' for none)")
         return None, None          # handled by the polynomial core
+    if law in _HYBRID_LAWS:
+        n_w = _HYBRID_LAWS[law].n_w
+        if len(u) != n_w:
+            raise ValueError(f"{law} takes {n_w} weights; got {len(u)}")
+        return None, None          # handled by the hybrid core
     raise ValueError(
         f"limb_dark {law!r} not supported; choose from {_SUPPORTED_LD}. "
         "Non-polynomial laws (nonlinear, squareroot, logarithmic) are "
@@ -219,9 +233,9 @@ def _ld_coeffs_batch(law, u):
     raise ValueError(f"unexpected law {law!r} in the batched path")
 
 
-def _unpack_ld(poly, tail):
+def _unpack_ld(vec, tail):
     """(u1, u2, uvec, fp) from the trailing limb-darkening + fp args."""
-    if poly:
+    if vec:
         uv, fp = tail
         return None, None, uv, fp
     u1, u2, fp = tail
@@ -267,8 +281,10 @@ class TransitModel:
         self.n_gl = int(n_gl)
         self.transittype = transittype
         self.limb_dark = params.limb_dark
-        self._n_poly = (len(_u_vector(params.u))
-                        if params.limb_dark == "polynomial" else 0)
+        # vector laws (polynomial, hybrid): the coefficient count is fixed
+        # per model, baked into the compiled graph
+        self._n_vec = (len(_u_vector(params.u))
+                       if params.limb_dark in _VECTOR_LAWS else 0)
         self.dtype = mx.float64 if dtype is None else dtype
         self._stream = mx.cpu if self.dtype == mx.float64 else None
         # fused Metal kernel for fp32 GPU evaluation (falls back on its
@@ -313,9 +329,11 @@ class TransitModel:
     def _photom(self, z, front, rp, u1, u2, fp, uvec=None):
         if self.transittype == "primary":
             z_eff = mx.where(front, z, 2.0 + z)
-            if uvec is not None:          # arbitrary-order polynomial law
-                return 1.0 + flux_dev_poly(z_eff, rp, uvec,
-                                           n_max=self._n_poly)
+            if uvec is not None:          # a vector law: polynomial or hybrid
+                if self.limb_dark == "polynomial":
+                    return 1.0 + flux_dev_poly(z_eff, rp, uvec,
+                                               n_max=self._n_vec)
+                return 1.0 + flux_dev_hybrid(z_eff, rp, uvec, self.limb_dark)
             core = flux_dev_metal if self.use_metal else flux_dev
             return 1.0 + core(z_eff, rp, u1, u2)
         z_eff = mx.where(front, 2.0 + z, z)
@@ -342,7 +360,7 @@ class TransitModel:
         graphs, (e, w [rad]) inputs in place of (k, h) -- light_curve_mx's
         differentiable route, exact at e = 0 (anchored.anchor_constants_ew).
         With ew=False every graph is exactly what it always was."""
-        poly = bool(self._n_poly)
+        vec = bool(self._n_vec)
         # The kernel decision depends on the *active* stream, so it is part
         # of the key: a graph first built under the CPU stream (an fp64
         # gradient, say) must not be the one every later GPU call reuses.
@@ -351,7 +369,7 @@ class TransitModel:
         # per stream. This is THE statement of what the kernel serves:
         # primary transits with quadratic limb darkening, on the (k, h)
         # or circular graph, without the contact rule.
-        kernel_branch = (not ew and not poly and self.transittype == "primary"
+        kernel_branch = (not ew and not vec and self.transittype == "primary"
                          and self.integration != "contact")
         kern = kernel_branch and self._kernel_usable()
         key = "ew" if ew else (circular, kern)
@@ -380,7 +398,7 @@ class TransitModel:
 
             if circular:
                 def raw(t0, per, a, b, rp, *ld_fp):
-                    u1, u2, uv, fp = _unpack_ld(poly, ld_fp)
+                    u1, u2, uv, fp = _unpack_ld(vec, ld_fp)
                     ci = b / a
                     cs = contact_offsets(rp, a, b)
                     T, W = exposure_nodes(t, t0, per, ex, cs, n_gl,
@@ -392,7 +410,7 @@ class TransitModel:
                     return _avg(z, cphi > 0.0, rp, u1, u2, fp, uv, W)
             else:
                 def raw(t0, per, a, k, h, ci, rp, *ld_fp):
-                    u1, u2, uv, fp = _unpack_ld(poly, ld_fp)
+                    u1, u2, uv, fp = _unpack_ld(vec, ld_fp)
                     kw = consts(k, h)
                     if ew:
                         e, esw = kw["consts"][0], kw["consts"][2]
@@ -408,7 +426,7 @@ class TransitModel:
                     z, front = separation_anchored(phi, k, h, a, ci, **kw)
                     return _avg(z, front, rp, u1, u2, fp, uv, W)
 
-        elif circular and poly:
+        elif circular and vec:
             def raw(t0, per, a, b, rp, uv, fp):
                 phase = (2.0 * math.pi) * (t - t0) / per
                 sphi, cphi = sincos(phase)
@@ -416,7 +434,7 @@ class TransitModel:
                                        1e-24))
                 return self._photom(z, cphi > 0.0, rp, None, None, fp,
                                     uvec=uv)
-        elif poly:
+        elif vec:
             def raw(t0, per, a, k, h, ci, rp, uv, fp):
                 phi = (2.0 * math.pi) * (t - t0) / per
                 z, front = separation_anchored(phi, k, h, a, ci,
@@ -555,7 +573,7 @@ class TransitModel:
         fp = cast(0.0 if params.fp is None else params.fp)
         per, a, rp = cast(params.per), cast(params.a), cast(params.rp)
 
-        if self._n_poly:
+        if self._n_vec:
             ld = (cast(uv),)
         else:
             ld = _ld_coeffs(params, conv=cast, u=uv)
@@ -608,11 +626,11 @@ class TransitModel:
                 "build a new TransitModel")
         u = _u_vector(params.u, sets=sets)
         n_u = u.shape[-1] if sets else len(u)
-        if self._n_poly and n_u != self._n_poly:
+        if self._n_vec and n_u != self._n_vec:
             raise ValueError(
-                f"polynomial limb-darkening order changed since model "
-                f"construction ({self._n_poly} -> {n_u} coefficients); "
-                f"build a new TransitModel")
+                f"limb-darkening coefficient count changed since model "
+                f"construction ({self._n_vec} -> {n_u}); build a new "
+                f"TransitModel")
         return u
 
     def light_curve(self, params) -> np.ndarray:
@@ -725,7 +743,7 @@ class TransitModel:
             sq = np.sqrt(ecc)
             k, h = col(sq * np.cos(w)), col(sq * np.sin(w))
             fp = col(cols["fp"])
-            if self._n_poly:
+            if self._n_vec:
                 uvec = mx.array(u_np, dtype=dt)
                 u1 = u2 = None
             else:

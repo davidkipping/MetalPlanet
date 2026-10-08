@@ -23,7 +23,8 @@ from metalplanet.metal import metal_available
 T = np.linspace(-0.15, 0.15, 601)
 EXP = 0.02
 LAWS = {"quadratic": [0.4, 0.25], "linear": [0.5], "uniform": [],
-        "polynomial": [0.4, 0.25, 0.05]}
+        "polynomial": [0.4, 0.25, 0.05], "hybrid2": [0.3, 0.2],
+        "hybrid4": [0.2, 0.2, 0.1, 0.1], "hybrid5": [0.2, 0.2, 0.1, 0.1, 0.1]}
 MODES = {"plain": {}, "contact": dict(exp_time=EXP, integration="contact"),
          "supersample": dict(exp_time=EXP, supersample_factor=5)}
 

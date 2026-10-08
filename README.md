@@ -250,6 +250,49 @@ Matching the 25-evaluation result with uniform supersampling would take
 N ~ 19,500 — about 780x the model evaluations. `supersample_factor`
 remains the default for batman parity.
 
+## Hybrid limb darkening: `limb_dark="hybrid2" | "hybrid4" | "hybrid5"`
+
+Three laws from SquishierPlanet built from even powers of mu plus
+"double-pole" terms 1/(mu^2 + eps)^2, which are infinite only just outside
+the star and so follow a real profile's steep fall at the limb. On
+simulated M-G dwarfs hybrid4 is 15-20x more accurate than the quadratic
+law and hybrid5 ties the Claret four-parameter law (0.6 ppm). They are
+written in a shape basis: each coefficient w_j is the share of the
+centre-to-limb drop its term carries, so `I(0)/I(1) = 1 - sum(w)`:
+
+```python
+from metalplanet import TransitParams, TransitModel, simplex_from_q_np
+
+p = TransitParams()
+p.t0, p.per, p.rp, p.a, p.inc, p.ecc, p.w = 0.0, 3.45, 0.1, 8.8, 87.0, 0.0, 90.0
+p.limb_dark = "hybrid5"
+p.u = simplex_from_q_np([0.3, 0.5, 0.2, 0.6, 0.4])   # 5 weights, uniform on the physical simplex
+flux = TransitModel(p, t).light_curve(p)
+```
+
+| law | weights | terms | poles eps |
+|---|---|---|---|
+| hybrid2 | 2 | 1 - mu^2, Pi_eps | 0.208 |
+| hybrid4 | 4 | 1 - mu^4, (1 - mu^2)^2, Pi_eps x 2 | 0.0118, 0.304 |
+| hybrid5 | 5 | 1 - mu^4, (1 - mu^2)^2, Pi_eps x 3 | 0.0016, 0.0413, 0.387 |
+
+with `Pi_eps = [(mu^2 + eps)^-2 - (1 + eps)^-2] / [eps^-2 - (1 + eps)^-2]`
+and the hybrid4/5 poles on the analytic ladder `exp[2 pi (sqrt(k + 1/2)
+- sqrt K)]`. Uniform priors on the physical regions: `hybrid2_from_q`
+(the exact triangle) and `simplex_from_q` (stick-breaking on
+`w >= 0, sum w <= 1`), MLX and numpy versions, with inverses.
+
+For a spherical planet every column is elementary -- **no elliptic
+integrals**, unlike the quadratic law's mu term: the even powers come from
+the ALFM19 even recursion and a pole term is kap1/(p eps) plus an atan or
+log of rational functions of (z, r). Checked against a 30-digit direct
+integration to 1e-13 and against SquishierPlanet's ellipse code at a = b
+to 1e-12 (`metalplanet/hybrid.py`). The laws ride the same paths as the
+polynomial law: `light_curve`, `light_curves` (per-set weights), the
+contact rule, eccentric orbits, and `light_curve_mx` differentiable in
+every weight. Like the polynomial law they run on the MLX graph (fp32 on
+the GPU, fp64 on the CPU), not the fused kernel.
+
 ## Sampling per-transit times: `flux_dev_from_tau`
 
 The fused model kernel (`make_quad_transit_flux`) derives each point's

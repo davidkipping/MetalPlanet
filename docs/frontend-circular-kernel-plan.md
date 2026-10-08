@@ -51,7 +51,7 @@ Mirror `_ecc_kernel_usable` / the contact branch in `api.py`:
 
 1. Add `_circ_kernel_usable()`: `use_metal`, `transittype == "primary"`,
    `dtype == mx.float32`, GPU stream, `metal_available()`, **and not**
-   `self._n_poly` (the v2 kernel is quadratic-only, exactly as the v3
+   `self._n_vec` (then `_n_poly`) (the v2 kernel is quadratic-only, exactly as the v3
    kernel is).
 2. In `_get_compiled(circular=True)`, add a branch building
    `make_model_core_metal(0.0)` and calling it with
