@@ -5,6 +5,8 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-10-08
+
 ### Added
 - **Hybrid limb-darkening laws, stage 1 of 3: closed forms and the fp64
   reference** (`metalplanet/hybrid.py`). SquishierPlanet's hybrid2,
