@@ -5,6 +5,41 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+### Added
+- **Hybrid limb-darkening laws, stage 1 of 3: closed forms and the fp64
+  reference** (`metalplanet/hybrid.py`). SquishierPlanet's hybrid2,
+  hybrid4 and hybrid5 -- even powers of mu plus double-pole terms
+  1/(mu^2 + eps)^2, written in a shape basis whose weights w are each the
+  share of the centre-to-limb drop a term carries -- as
+  `flux_dev_hybrid(z, r, w, law)`, the shape-basis columns `shape_cols`
+  (the `ld_basis` contract `flux - 1 == (B @ c)/(N @ c)`, `c = (1, -w)`,
+  `N = hybrid_norms`), their analytic partials `shape_partials`, and the
+  uniform priors on the physical regions (`ld.hybrid2_from_q` on the
+  exact triangle, `ld.simplex_from_q` by stick-breaking, with inverses).
+
+  For a spherical planet the mathematics simplifies: every column is
+  elementary. The even powers come from s_0, s_2 and the ALFM19 even
+  recursion M_0 -> M_2 -> M_4 (never the elliptic M_1, M_3); a pole term's
+  occulted flux is kap1/(p eps) plus an atan or log of rational functions
+  of (z, r) (Green's theorem with h = 1/(2p(p - s))), with a series
+  bridging the removable singularity on z + r = sqrt(1 + eps). Unlike the
+  quadratic law's mu^1 term, **no column needs an elliptic integral**.
+  Every sqrt(depth) dependence is routed through the core's `kite`, so
+  the three cancelling terms of the pole form see one rounded lens near
+  the contacts (without that, fp32 lost 1e-6 there).
+
+  Measured: against a 30-digit direct integration, the pole columns agree
+  to 1e-13 of their norm (1e-12 within 1e-6 of a contact, the geometry's
+  own conditioning), the laws to 1e-13; against SquishierPlanet's ellipse
+  code at a = b, 1e-12; the even columns match the cel3 route to 1e-14.
+  Autodiff matches finite differences to 1e-7 in z, r and every weight;
+  the analytic partials match autodiff to 1e-11 (except at MLX's max/min
+  ties z == r and z == 1, where autodiff splits the gradient and the
+  analytic partials are the ones that match FD). fp32 stays within 1e-6
+  of fp64 at every simplex vertex. 90 tests (`tests/test_hybrid.py`).
+  Nothing user-facing changes yet: `TransitModel` and the kernels follow
+  in stages 2 and 3. Existing paths bitwise unchanged (296 arrays).
+
 ## [0.9.7] — 2026-10-04
 
 Fixes from a seventh code review (of 0.9.6).

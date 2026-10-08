@@ -23,7 +23,11 @@ from .kepler import (kepler, kepler_E, kepler_E_sincos,
                      separation_keplerian)
 from .anchored import anchor_constants, separation_anchored
 from .poly import flux_dev_poly, sn_dev_poly
-from .ld import q_to_u, q_to_u_np, u_to_q_np
+from .hybrid import (HYBRID2, HYBRID4, HYBRID5, HybridLaw, LAWS as HYBRID_LAWS,
+                     flux_dev_hybrid, hybrid_norms, shape_cols)
+from .ld import (hybrid2_from_q, hybrid2_from_q_np, hybrid2_to_q_np,
+                 q_from_simplex_np, q_to_u, q_to_u_np, simplex_from_q,
+                 simplex_from_q_np, u_to_q_np)
 from .metal import flux_dev_from_tau, flux_dev_metal, metal_available
 from .solution import sn_dev, sn_dev_with_aux
 from .vjp import flux_dev_analytic
@@ -53,6 +57,20 @@ __all__ = [
     "q_to_u",
     "q_to_u_np",
     "u_to_q_np",
+    "HybridLaw",
+    "HYBRID2",
+    "HYBRID4",
+    "HYBRID5",
+    "HYBRID_LAWS",
+    "flux_dev_hybrid",
+    "hybrid_norms",
+    "shape_cols",
+    "hybrid2_from_q",
+    "hybrid2_from_q_np",
+    "hybrid2_to_q_np",
+    "simplex_from_q",
+    "simplex_from_q_np",
+    "q_from_simplex_np",
     "sn_dev",
     "sn_dev_with_aux",
 ]
