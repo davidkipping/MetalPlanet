@@ -5,6 +5,8 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-10-08
+
 ### Changed
 - **`TransitModel` runs the hybrid laws' photometry in the fused fp32
   kernel.** On an fp32 GPU model, `_photom` now sends a hybrid law to
