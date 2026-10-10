@@ -421,3 +421,66 @@ def test_priors_feed_the_model():
         p = params(law, u=w)
         f = metalplanet.TransitModel(p, T).light_curve(p)
         assert np.isfinite(f).all() and f.min() < 0.99 and f.max() <= 1.0
+
+
+
+# ---------------------------------------------------------------------------
+# custom laws: a HybridLaw object wherever a name goes (0.12.1)
+# ---------------------------------------------------------------------------
+
+CUSTOM = {
+    "hybrid2-type": metalplanet.HybridLaw("custom2", [0.15], [[1, -1, 0]]),
+    "two-pole": metalplanet.HybridLaw("custom3", (0.05, 0.5), ((1, 0, -1),)),
+}
+
+
+@pytest.mark.parametrize("which", list(CUSTOM))
+@pytest.mark.parametrize("dtype", [None, mx.float32], ids=["fp64", "fp32"])
+def test_transit_model_takes_a_hybrid_law_object(which, dtype):
+    """light_curve, light_curves and light_curve_mx with a custom law equal
+    flux_dev_hybrid on the model's own separations."""
+    if dtype is mx.float32 and not metal_available():
+        pytest.skip("Metal unavailable")
+    law = CUSTOM[which]
+    w = phys_w(law, np.random.default_rng(3))
+    p = params("hybrid2")
+    p.limb_dark, p.u = law, list(w)
+    m = metalplanet.TransitModel(p, T, dtype=dtype)
+    f = m.light_curve(p)
+    ref = metalplanet.TransitModel(p, T).light_curve(p)
+    tol = 0.0 if dtype is None else 2e-6
+    assert np.abs(f - ref).max() <= tol
+    assert np.abs(np.asarray(m.light_curve_mx(p), np.float64) - f).max() <= 1e-6
+    pa = params("hybrid2")
+    pa.limb_dark, pa.u = law, np.stack([w, w])
+    pa.rp = np.array([RP, RP])
+    lcs = m.light_curves(pa)
+    assert np.abs(lcs - f[None, :]).max() <= (1e-14 if dtype is None else 2e-7)
+
+
+def test_an_equal_law_object_is_the_same_law():
+    """_check_law compares laws by value: a fresh, equal object is fine."""
+    law = CUSTOM["hybrid2-type"]
+    p = params("hybrid2")
+    p.limb_dark, p.u = law, [0.3, 0.2]
+    m = metalplanet.TransitModel(p, T)
+    p.limb_dark = metalplanet.HybridLaw("custom2", (0.15,), ((1.0, -1.0, 0.0),))
+    m.light_curve(p)
+    p.limb_dark = metalplanet.HybridLaw("custom2", (0.2,), ((1.0, -1.0, 0.0),))
+    with pytest.raises(ValueError, match="law changed"):
+        m.light_curve(p)
+
+
+def test_a_law_registered_after_import_is_supported():
+    from metalplanet import hybrid as Hm
+    law = metalplanet.HybridLaw("late2", (0.25,), ((1.0, -1.0, 0.0),))
+    Hm.LAWS["late2"] = law
+    try:
+        p = params("hybrid2")
+        p.limb_dark, p.u = "late2", [0.3, 0.2]
+        a = metalplanet.TransitModel(p, T).light_curve(p)
+        p.limb_dark = law
+        b = metalplanet.TransitModel(p, T).light_curve(p)
+        assert np.array_equal(a, b)
+    finally:
+        del Hm.LAWS["late2"]

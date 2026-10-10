@@ -139,6 +139,14 @@ class TestDefinitions:
         assert (HYBRID2.n_w, HYBRID4.n_w, HYBRID5.n_w) == (2, 4, 5)
 
     @pytest.mark.skipif(sp is None, reason="squishierplanet not importable")
+    def test_hybrid2_pole_matches_squishierplanet(self):
+        """MetalPlanet's hybrid2 IS SquishierPlanet's: if either moves its
+        pole this fails, rather than the cross-checks below quietly skipping
+        hybrid2."""
+        from squishierplanet import laws as spl
+        assert H.HYBRID2_EPS == float(spl.HYBRID2_EPS)
+
+    @pytest.mark.skipif(sp is None, reason="squishierplanet not importable")
     def test_matches_squishierplanet_definitions(self):
         from squishierplanet import laws as spl
         assert np.allclose(ladder(2), spl.ladder(2), rtol=1e-15)
@@ -557,6 +565,11 @@ class TestPriors:
         assert np.allclose(np.asarray(m1), w1[:50], atol=1e-15)
         assert np.allclose(np.asarray(m2), w2[:50], atol=1e-15)
 
+    def test_vertices_are_cached_but_returned_fresh(self):
+        a = ld.hybrid2_vertices()
+        a[0][0] = 99.0                        # a caller mutating its copy
+        assert ld.hybrid2_vertices()[0][0] != 99.0
+
     def test_prior_pole_arguments(self):
         """law= ties the triangle to a law; it refuses a non-hybrid2-type
         law and a conflicting eps=."""
@@ -570,11 +583,16 @@ class TestPriors:
 
     @pytest.mark.skipif(sp is None, reason="squishierplanet not importable")
     def test_priors_match_squishierplanet(self):
+        """Both packages' DEFAULT hybrid2 prior (drift is reported by
+        test_hybrid2_pole_matches_squishierplanet)."""
         from squishierplanet import laws as spl
+        if not sp_same_hybrid2():
+            pytest.skip("this SquishierPlanet checkout's hybrid2 pole is not "
+                        "MetalPlanet's (see the pole test)")
         rng = np.random.default_rng(1)
         q1, q2 = rng.random(100), rng.random(100)
         ref = spl.hybrid2_from_q(q1, q2)
-        w1, w2 = ld.hybrid2_from_q_np(q1, q2, eps=spl.HYBRID2_EPS)
+        w1, w2 = ld.hybrid2_from_q_np(q1, q2)
         assert np.allclose(np.stack([w1, w2], -1), ref, atol=1e-15)
         q = rng.random((100, 5))
         assert np.allclose(ld.simplex_from_q_np(q), spl.simplex_from_q(q),

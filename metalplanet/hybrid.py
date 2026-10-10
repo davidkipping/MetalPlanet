@@ -142,6 +142,27 @@ class HybridLaw:
     eps: tuple
     shapes: tuple
 
+    def __post_init__(self):
+        # normalised once, here: lists or numpy scalars from a caller become
+        # tuples of floats, so the law hashes and compares by value
+        object.__setattr__(self, "eps", tuple(float(e) for e in self.eps))
+        object.__setattr__(self, "shapes", tuple(
+            tuple(float(c) for c in a) for a in self.shapes))
+
+    @property
+    def definition(self) -> tuple:
+        """What the law computes -- its poles and shapes, not its name. The
+        kernel caches key on this: two laws alike in name but not here never
+        share a kernel, and two alike here share one whatever their names."""
+        return (self.eps, self.shapes)
+
+    @property
+    def is_hybrid2_type(self) -> bool:
+        """hybrid2's structure -- shapes {1 - mu^2} and one pole -- whose
+        physical region is an exact triangle (ld.hybrid2_from_q) rather than
+        the simplex of the other laws."""
+        return len(self.eps) == 1 and self.shapes == ((1.0, -1.0, 0.0),)
+
     @property
     def n_w(self) -> int:
         return len(self.shapes) + len(self.eps)
@@ -186,9 +207,9 @@ class HybridLaw:
 HYBRID2 = HybridLaw("hybrid2", (HYBRID2_EPS,), ((1.0, -1.0, 0.0),))
 HYBRID4 = HybridLaw("hybrid4", ladder(2), ((1.0, 0.0, -1.0), (1.0, -2.0, 1.0)))
 HYBRID5 = HybridLaw("hybrid5", ladder(3), ((1.0, 0.0, -1.0), (1.0, -2.0, 1.0)))
-#: THE registry of hybrid laws: every entry point accepts these names. A
-#: HybridLaw object works too; the kernels are cached per law *definition*
-#: (metal_hybrid._law_key), never per name alone
+#: THE registry of hybrid laws: every entry point accepts these names, read
+#: at call time. A HybridLaw object works anywhere a name does; the kernels
+#: are cached per law ``definition``, never per name
 LAWS = {law.name: law for law in (HYBRID2, HYBRID4, HYBRID5)}
 
 

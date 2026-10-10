@@ -5,6 +5,43 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.12.1] — 2026-10-10
+
+Code-review round on 0.12.0.
+
+### Fixed
+- **`TransitModel` refused a `HybridLaw` object**, though the README and
+  the registry promised one is accepted wherever a law name is (only
+  `flux_dev_from_tau` and `flux_dev_metal` took it). The frontend now
+  resolves `limb_dark` through one helper -- a `HybridLaw`, or a name in
+  the registry read at call time, so a law registered after import is
+  known to every entry point alike -- on `light_curve`, `light_curves`
+  and `light_curve_mx`, fp64 and fp32. Equal law objects are the same law
+  (`_check_law` compares by value).
+- **The kernel cache identity included the law's name**, so a registered
+  law re-made under another name compiled duplicate kernels. It is now
+  `HybridLaw.definition` (poles and shapes): a renamed copy reuses the
+  registered kernels, bitwise.
+
+### Changed
+- `HybridLaw` normalises its fields on construction (lists, numpy scalars
+  -> tuples of floats), so it hashes and compares by value; `definition`
+  and `is_hybrid2_type` are properties -- the one rule for cache identity
+  and for which prior a law gets (`ld`'s `law=` check and the tests' weight
+  sampler both read it). The cache-key helper is gone.
+- `hybrid2_vertices` is computed once per pole (cached; fresh arrays
+  returned), so a sampler's log-prior no longer repeats host work every
+  step.
+- README: kernels are kept per definition; each new one is one compile.
+
+### Tests
+- `TransitModel` with a hybrid2-type and a two-pole custom law on every
+  path and precision; equal law objects; a law registered after import;
+  a renamed registered law sharing its kernels; vertices returned fresh.
+- `test_hybrid2_pole_matches_squishierplanet` fails if either package
+  moves hybrid2's pole; the prior cross-check now compares both packages'
+  default priors (it passed SquishierPlanet's pole to ours before).
+
 ## [0.12.0] — 2026-10-10
 
 ### Changed
@@ -40,7 +77,7 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
   compiles -- both fail on the old keying; the prior's `law=` path at a
   non-default pole (constraints, monotone profile, round trip, MLX =
   numpy) and its argument checks. The SquishierPlanet cross-checks skip
-  hybrid2, with the reason, on a checkout whose pole differs.
+  hybrid2 on a checkout whose pole differs.
 
 ## [0.11.0] — 2026-10-10
 

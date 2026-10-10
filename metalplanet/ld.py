@@ -14,6 +14,8 @@ handled by the ParamSpec sigmoid transform as usual.
 
 from __future__ import annotations
 
+import functools
+
 import mlx.core as mx
 import numpy as np
 
@@ -63,12 +65,12 @@ def _hybrid2_pole(eps=None, law=None) -> float:
     """The pole a hybrid2-family prior is for: ``law`` (a name or HybridLaw
     with hybrid2's shapes and one pole) ties the prior to the law it
     serves; ``eps`` gives the pole directly; neither means hybrid2's."""
-    from .hybrid import HYBRID2, HYBRID2_EPS, get_law
+    from .hybrid import HYBRID2_EPS, get_law
     if law is not None:
         if eps is not None:
             raise ValueError("pass law= or eps=, not both")
         L = get_law(law)
-        if len(L.eps) != 1 or tuple(map(tuple, L.shapes)) != HYBRID2.shapes:
+        if not L.is_hybrid2_type:
             raise ValueError(f"{L.name} is not a hybrid2-type law (shapes "
                              "{1 - mu^2, Pi_eps}); its prior is "
                              "simplex_from_q")
@@ -83,13 +85,19 @@ def hybrid2_vertices(eps=None, law=None):
     intensity and zero central slope, V_l zero limb intensity and zero
     limb slope. Float64 numpy. The pole is hybrid2's unless ``law=`` (the
     law the prior serves) or ``eps=`` says otherwise."""
-    e = _hybrid2_pole(eps, law)
+    Vc, Vl = _vertices(_hybrid2_pole(eps, law))
+    return np.array(Vc), np.array(Vl)
+
+
+@functools.lru_cache(maxsize=64)
+def _vertices(e: float):
+    """The triangle for pole e, computed once per pole: a sampler's
+    log-prior calls hybrid2_from_q every step."""
     N = e ** -2 - (1.0 + e) ** -2
     g0 = 2.0 / (N * e ** 3)
     g1 = 2.0 / (N * (1.0 + e) ** 3)
-    Vc = np.array([-g1 / (1.0 - g1), 1.0 / (1.0 - g1)])
-    Vl = np.array([g0 / (g0 - 1.0), -1.0 / (g0 - 1.0)])
-    return Vc, Vl
+    return ((-g1 / (1.0 - g1), 1.0 / (1.0 - g1)),
+            (g0 / (g0 - 1.0), -1.0 / (g0 - 1.0)))
 
 
 def hybrid2_from_q(q1: mx.array, q2: mx.array, eps=None, law=None):

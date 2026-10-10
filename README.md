@@ -304,9 +304,13 @@ and the hybrid4/5 poles on the analytic ladder `exp[2 pi (sqrt(k + 1/2)
 hybrid2's pole, eps = 0.36, is SquishierPlanet / LDhybrid v1.0's tuning
 over 198 PHOENIX v3.0 and MPS-ATLAS models x 37 passbands, where hybrid2
 beats quadratic in 73% of model-bands. A custom law is a `HybridLaw`
-object, accepted wherever a law name is (kernels are cached per law
-definition); give a custom hybrid2-type law's prior its pole with
-`hybrid2_from_q(q1, q2, law=my_law)`.
+object, accepted wherever a law name is -- `TransitParams.limb_dark`,
+`flux_dev_from_tau(limb_dark=...)`, `flux_dev_metal` -- and its prior is
+tied to it with `hybrid2_from_q(q1, q2, law=my_law)` for a hybrid2-type
+law. Kernels are compiled and kept per law *definition* (poles and
+shapes, not name): a law equal to a registered one reuses its kernels,
+and each new definition costs one compile for the life of the process, so
+build a scan over poles as a few laws, not thousands.
 
 For a spherical planet every column is elementary -- **no elliptic
 integrals**, unlike the quadratic law's mu term: the even powers come from

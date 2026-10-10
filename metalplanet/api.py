@@ -52,7 +52,7 @@ from .flux import flux_dev
 from .metal import _gpu_stream_active, flux_dev_metal, metal_available
 from .metal_hybrid import flux_dev_metal_hybrid
 from .anchored import anchor_constants_ew, separation_anchored
-from .hybrid import LAWS as _HYBRID_LAWS, flux_dev_hybrid
+from .hybrid import LAWS as _HYBRID_LAWS, HybridLaw, flux_dev_hybrid
 from .poly import flux_dev_poly
 from .exposure import (contact_geometry, contact_offsets,
                        contact_offsets_anchored, exposure_nodes)
@@ -61,13 +61,27 @@ from .trig import sincos
 
 __all__ = ["TransitParams", "TransitModel"]
 
-_SUPPORTED_LD = ("uniform", "linear", "quadratic", "polynomial",
-                 *_HYBRID_LAWS)          # the hybrid law registry
-#: laws whose coefficients enter the graph as one vector (uvec) rather
-#: than as (u1, u2): the polynomial law at any order, and the hybrid laws
-#: at their fixed count of shape weights
-_VECTOR_LAWS = {"polynomial": None,
-                **{n: law.n_w for n, law in _HYBRID_LAWS.items()}}
+_BUILTIN_LD = ("uniform", "linear", "quadratic", "polynomial")
+
+
+def _hybrid_law(law):
+    """The HybridLaw ``limb_dark`` names, or None: a HybridLaw object as
+    is, or a name in the hybrid registry, read at call time (so a law
+    registered after import is known here as it is to flux_dev_from_tau)."""
+    if isinstance(law, HybridLaw):
+        return law
+    return _HYBRID_LAWS.get(law) if isinstance(law, str) else None
+
+
+def _supported_ld() -> tuple:
+    return _BUILTIN_LD + tuple(_HYBRID_LAWS)
+
+
+def _is_vector_law(law) -> bool:
+    """Coefficients enter the graph as one vector (uvec), not (u1, u2):
+    the polynomial law at any order, and the hybrid laws at their fixed
+    count of shape weights."""
+    return law == "polynomial" or _hybrid_law(law) is not None
 
 
 class TransitParams:
@@ -161,13 +175,15 @@ def _ld_coeffs(params, conv=float, u=None) -> tuple[float, float]:
             raise ValueError("polynomial limb darkening needs >= 1 "
                              "coefficient (use 'uniform' for none)")
         return None, None          # handled by the polynomial core
-    if law in _HYBRID_LAWS:
-        n_w = _HYBRID_LAWS[law].n_w
-        if len(u) != n_w:
-            raise ValueError(f"{law} takes {n_w} weights; got {len(u)}")
+    hl = _hybrid_law(law)
+    if hl is not None:
+        if len(u) != hl.n_w:
+            raise ValueError(f"{hl.name} takes {hl.n_w} weights; "
+                             f"got {len(u)}")
         return None, None          # handled by the hybrid core
     raise ValueError(
-        f"limb_dark {law!r} not supported; choose from {_SUPPORTED_LD}. "
+        f"limb_dark {law!r} not supported; choose from {_supported_ld()} "
+        "or pass a HybridLaw. "
         "Non-polynomial laws (nonlinear, squareroot, logarithmic) are "
         "outside the ALFM19 formulation.")
 
@@ -285,7 +301,7 @@ class TransitModel:
         # vector laws (polynomial, hybrid): the coefficient count is fixed
         # per model, baked into the compiled graph
         self._n_vec = (len(_u_vector(params.u))
-                       if params.limb_dark in _VECTOR_LAWS else 0)
+                       if _is_vector_law(params.limb_dark) else 0)
         self.dtype = mx.float64 if dtype is None else dtype
         self._stream = mx.cpu if self.dtype == mx.float64 else None
         # fused Metal kernel for fp32 GPU evaluation (falls back on its
@@ -367,7 +383,7 @@ class TransitModel:
         law = self.limb_dark
         if not self._kernel_usable():
             return flux_dev_hybrid(z, rp, uvec, law)
-        n_w = _HYBRID_LAWS[law].n_w
+        n_w = _hybrid_law(law).n_w
         one_set = ((not isinstance(rp, mx.array) or rp.size == 1)
                    and uvec.size == n_w)
         if one_set:                        # (n_w,) or a (1, n_w) row

@@ -651,3 +651,20 @@ def test_a_law_name_need_not_be_a_metal_identifier():
     got = np.asarray(flux_dev_metal_hybrid(z, 0.1, law, [0.3, 0.2]))
     ref = np.asarray(flux_dev_hybrid(z, 0.1, [0.3, 0.2], law))
     assert np.abs(got - ref).max() < 1e-6
+
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+def test_a_renamed_registered_law_shares_its_kernels():
+    """The cache identity is the definition: a copy of hybrid2 under another
+    name compiles nothing new and computes bitwise the same."""
+    from metalplanet.hybrid import HYBRID2, HybridLaw
+    from metalplanet.metal_hybrid import _law_tag, flux_dev_metal_hybrid
+    copy = HybridLaw("mine", HYBRID2.eps, HYBRID2.shapes)
+    assert _law_tag(copy) == "hybrid2" and copy.definition == HYBRID2.definition
+    z = mx.array(np.linspace(0.0, 1.15, 200, dtype=np.float32))
+    n0 = len(M._kernels)
+    a = np.asarray(flux_dev_metal_hybrid(z, 0.1, "hybrid2", [0.3, 0.2]))
+    n1 = len(M._kernels)
+    b = np.asarray(flux_dev_metal_hybrid(z, 0.1, copy, [0.3, 0.2]))
+    assert np.array_equal(a, b) and len(M._kernels) == n1 >= n0

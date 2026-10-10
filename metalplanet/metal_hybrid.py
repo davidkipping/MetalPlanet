@@ -412,31 +412,24 @@ def _nslot(law, orbit: str, basis: bool) -> int:
     return 2 + _nth(orbit) + (2 if basis else get_law(law).n_w)
 
 
-def _law_key(law):
-    """A law's cache identity: its whole definition, never its name alone.
-    Two HybridLaws named alike but with different poles or shapes (a
-    user-built "hybrid2" at another eps, say) must not share a kernel --
-    keyed by name, the second silently ran the first's constants."""
-    return (law.name, tuple(float(e) for e in law.eps),
-            tuple(tuple(float(c) for c in sh) for sh in law.shapes))
-
-
 def _law_tag(law):
-    """Metal kernel-name fragment: a registered law's own name (its kernels
-    are unchanged); any other definition gets a sanitised name plus a digest
-    of the definition, so it is a valid identifier and never collides."""
+    """Metal kernel-name fragment: the registered law's name for a
+    registered definition (its kernels are unchanged); any other definition
+    gets a sanitised name plus a digest of the definition, so the tag is a
+    valid identifier and never collides. Every distinct definition compiles
+    its own kernels, kept for the life of the process."""
     from .hybrid import LAWS
-    reg = LAWS.get(law.name)
-    if reg is not None and _law_key(reg) == _law_key(law):
-        return law.name
+    for reg in LAWS.values():
+        if reg.definition == law.definition:
+            return reg.name
     safe = re.sub(r"[^0-9A-Za-z_]", "_", law.name)
-    digest = hashlib.sha1(repr(_law_key(law)).encode()).hexdigest()[:10]
+    digest = hashlib.sha1(repr(law.definition).encode()).hexdigest()[:10]
     return f"{safe}_{digest}"
 
 
 def _get_kernels(law, orbit: str, basis: bool):
     law = get_law(law)
-    key = ("hyb", _law_key(law), orbit, basis)
+    key = ("hyb", law.definition, orbit, basis)
     if key not in M._kernels:
         hdr = M._HEADER + M._phot_header()
         if orbit == "ecc":
@@ -468,7 +461,7 @@ def _make_core(law, exp_time, mode, n_gl, n_sub, orbit, basis):
     (tau2d, period, a, shape, r, [w2d,] cs) -- as metal._make_tau_core_g,
     with the (n, n_w) weights in place of u1, u2."""
     law = get_law(law)
-    key = ("hyb", _law_key(law), orbit, bool(basis), float(exp_time), int(mode),
+    key = ("hyb", law.definition, orbit, bool(basis), float(exp_time), int(mode),
            int(n_gl), int(n_sub))
     if key in M._tau_cores:
         return M._tau_cores[key]
@@ -703,7 +696,7 @@ _ZH_VJP_B = _ZH_HEAD + """
 
 def _get_z_kernels(law, basis: bool):
     law = get_law(law)
-    key = ("hybz", _law_key(law), basis)
+    key = ("hybz", law.definition, basis)
     if key not in M._kernels:
         hdr = M._HEADER + _hyb_header(law)
         tag = f"{_law_tag(law)}{'_b' if basis else ''}"
@@ -732,7 +725,7 @@ def _get_z_kernels(law, basis: bool):
 
 def _z_core(law, basis: bool):
     law = get_law(law)
-    key = ("hybz", _law_key(law), bool(basis))
+    key = ("hybz", law.definition, bool(basis))
     if key in M._tau_cores:
         return M._tau_cores[key]
     ncol, n_w = law.n_col, law.n_w
