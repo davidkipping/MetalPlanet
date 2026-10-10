@@ -1,6 +1,6 @@
 # Plan: occultors larger than the star (Rp/R* > 1)
 
-**Status: implemented (2026-10-10), unreleased.** Target release: v0.11.0.
+**Status: implemented and released in v0.11.0 (2026-10-10).**
 See "What changed from the plan" at the end.
 
 ## Why

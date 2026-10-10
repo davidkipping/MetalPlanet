@@ -5,6 +5,8 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-10-10
+
 ### Added
 - **Occultors larger than the star: `rp > 1`** (white-dwarf hosts; WD
   1856+534 b has Rp/R* = 7.28). Every entry point and law, fp64 and fp32,
