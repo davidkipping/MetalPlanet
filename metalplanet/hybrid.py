@@ -96,7 +96,7 @@ from .solution import _kite_sqarea
 from .dtypes import fp64_on_cpu
 
 __all__ = ["HybridLaw", "HYBRID2", "HYBRID4", "HYBRID5", "LAWS",
-           "HYBRID2_EPS", "ladder", "get_law", "hybrid_norms", "w_to_c",
+           "HYBRID2_EPS", "ladder", "find_law", "get_law", "hybrid_norms", "w_to_c",
            "shape_cols", "flux_dev_hybrid", "combine_cols", "shape_partials",
            "even_cols", "pole_col", "lens_geometry"]
 
@@ -213,14 +213,21 @@ HYBRID5 = HybridLaw("hybrid5", ladder(3), ((1.0, 0.0, -1.0), (1.0, -2.0, 1.0)))
 LAWS = {law.name: law for law in (HYBRID2, HYBRID4, HYBRID5)}
 
 
-def get_law(law) -> HybridLaw:
+def find_law(law):
+    """THE law resolver: a HybridLaw as is, a name in the registry (read
+    now), or None. Every entry point resolves through it -- get_law raises
+    on None, the TransitModel frontend treats None as "not a hybrid law"."""
     if isinstance(law, HybridLaw):
         return law
-    try:
-        return LAWS[law]
-    except (KeyError, TypeError):
+    return LAWS.get(law) if isinstance(law, str) else None
+
+
+def get_law(law) -> HybridLaw:
+    found = find_law(law)
+    if found is None:
         raise ValueError(f"unknown hybrid law {law!r}; expected one of "
-                         f"{sorted(LAWS)}") from None
+                         f"{sorted(LAWS)}")
+    return found
 
 
 def hybrid_norms(law) -> np.ndarray:

@@ -447,8 +447,12 @@ def test_transit_model_takes_a_hybrid_law_object(which, dtype):
     p.limb_dark, p.u = law, list(w)
     m = metalplanet.TransitModel(p, T, dtype=dtype)
     f = m.light_curve(p)
-    ref = metalplanet.TransitModel(p, T).light_curve(p)
-    tol = 0.0 if dtype is None else 2e-6
+    z, front = circular_z(T)
+    with mx.stream(mx.cpu):
+        ref = 1.0 + np.asarray(flux_dev_hybrid(
+            mx.array(np.where(front, z, 2 + z), dtype=mx.float64),
+            mx.array(RP, dtype=mx.float64), list(w), law))
+    tol = 1e-13 if dtype is None else 2e-6
     assert np.abs(f - ref).max() <= tol
     assert np.abs(np.asarray(m.light_curve_mx(p), np.float64) - f).max() <= 1e-6
     pa = params("hybrid2")
@@ -484,3 +488,45 @@ def test_a_law_registered_after_import_is_supported():
         assert np.array_equal(a, b)
     finally:
         del Hm.LAWS["late2"]
+
+
+
+def test_a_name_and_its_law_object_are_one_law():
+    """Built with "hybrid2", called with metalplanet.HYBRID2 (and the
+    reverse): the same law, not "law changed" (0.12.1 compared raw
+    fields)."""
+    for build, call in (("hybrid2", metalplanet.HYBRID2),
+                        (metalplanet.HYBRID2, "hybrid2")):
+        p = params("hybrid2")
+        p.limb_dark = build
+        m = metalplanet.TransitModel(p, T)
+        a = m.light_curve(p)
+        p.limb_dark = call
+        assert np.array_equal(m.light_curve(p), a)
+
+
+def test_a_model_keeps_its_law_when_the_registry_changes():
+    """The law is resolved once, at construction: re-binding or deleting
+    the name later cannot make one model trace two laws (0.12.1 re-read the
+    registry on every new graph)."""
+    from metalplanet import hybrid as Hm
+    law = metalplanet.HybridLaw("x", (0.2,), ((1.0, -1.0, 0.0),))
+    Hm.LAWS["x"] = law
+    try:
+        p = params("hybrid2")
+        p.limb_dark, p.u = "x", [0.3, 0.2]
+        m = metalplanet.TransitModel(p, T)
+        circ = m.light_curve(p)
+        Hm.LAWS["x"] = metalplanet.HybridLaw("x", (0.5,), ((1.0, -1.0, 0.0),))
+        with pytest.raises(ValueError, match="law changed"):
+            m.light_curve(p)                       # "x" now means another law
+        p.limb_dark = law
+        assert np.array_equal(m.light_curve(p), circ)
+        del Hm.LAWS["x"]
+        pe = params("hybrid2", ecc=0.2, w=63.0)    # a graph traced only now
+        pe.limb_dark, pe.u = law, [0.3, 0.2]
+        e = m.light_curve(pe)
+        ref = metalplanet.TransitModel(pe, T).light_curve(pe)
+        assert np.array_equal(e, ref)
+    finally:
+        Hm.LAWS.pop("x", None)

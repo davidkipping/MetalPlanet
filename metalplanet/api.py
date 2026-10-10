@@ -52,7 +52,8 @@ from .flux import flux_dev
 from .metal import _gpu_stream_active, flux_dev_metal, metal_available
 from .metal_hybrid import flux_dev_metal_hybrid
 from .anchored import anchor_constants_ew, separation_anchored
-from .hybrid import LAWS as _HYBRID_LAWS, HybridLaw, flux_dev_hybrid
+from .hybrid import LAWS as _HYBRID_LAWS, find_law as _hybrid_law
+from .hybrid import flux_dev_hybrid
 from .poly import flux_dev_poly
 from .exposure import (contact_geometry, contact_offsets,
                        contact_offsets_anchored, exposure_nodes)
@@ -62,15 +63,6 @@ from .trig import sincos
 __all__ = ["TransitParams", "TransitModel"]
 
 _BUILTIN_LD = ("uniform", "linear", "quadratic", "polynomial")
-
-
-def _hybrid_law(law):
-    """The HybridLaw ``limb_dark`` names, or None: a HybridLaw object as
-    is, or a name in the hybrid registry, read at call time (so a law
-    registered after import is known here as it is to flux_dev_from_tau)."""
-    if isinstance(law, HybridLaw):
-        return law
-    return _HYBRID_LAWS.get(law) if isinstance(law, str) else None
 
 
 def _supported_ld() -> tuple:
@@ -298,6 +290,9 @@ class TransitModel:
         self.n_gl = int(n_gl)
         self.transittype = transittype
         self.limb_dark = params.limb_dark
+        # a hybrid law is resolved ONCE, here: every graph this model traces
+        # uses this definition, whatever the registry does afterwards
+        self._hlaw = _hybrid_law(params.limb_dark)
         # vector laws (polynomial, hybrid): the coefficient count is fixed
         # per model, baked into the compiled graph
         self._n_vec = (len(_u_vector(params.u))
@@ -380,10 +375,10 @@ class TransitModel:
         (n, 1, 1)). One radius with one set of weights -- (n_w,) or a
         (1, n_w) row -- is one row of the grid, never a row per point.
         """
-        law = self.limb_dark
+        law = self._hlaw
         if not self._kernel_usable():
             return flux_dev_hybrid(z, rp, uvec, law)
-        n_w = _hybrid_law(law).n_w
+        n_w = law.n_w
         one_set = ((not isinstance(rp, mx.array) or rp.size == 1)
                    and uvec.size == n_w)
         if one_set:                        # (n_w,) or a (1, n_w) row
@@ -680,7 +675,15 @@ class TransitModel:
         flux_dev_poly rather than raising. Returns the normalised u
         (_u_vector: shape judged before the count), so each entry point
         normalises once and threads it through."""
-        if params.limb_dark != self.limb_dark:
+        if self._hlaw is not None:
+            # a hybrid law is the same law if it computes the same thing:
+            # the name "hybrid2" and metalplanet.HYBRID2 are one law; a name
+            # the registry has since re-bound to another definition is not
+            new = _hybrid_law(params.limb_dark)
+            changed = new is None or new.definition != self._hlaw.definition
+        else:
+            changed = params.limb_dark != self.limb_dark
+        if changed:
             raise ValueError(
                 "limb-darkening law changed since model construction; "
                 "build a new TransitModel")

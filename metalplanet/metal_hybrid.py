@@ -413,16 +413,22 @@ def _nslot(law, orbit: str, basis: bool) -> int:
 
 
 def _law_tag(law):
-    """Metal kernel-name fragment: the registered law's name for a
-    registered definition (its kernels are unchanged); any other definition
-    gets a sanitised name plus a digest of the definition, so the tag is a
-    valid identifier and never collides. Every distinct definition compiles
+    """Metal kernel-name fragment, always a valid identifier piece. A
+    registered definition whose name is already one (hybrid2/4/5) keeps
+    that name, so its kernels are unchanged; anything else -- an unregistered
+    definition, or a registered name like "my-law" (which aborted the
+    process in 0.12.1) -- gets the sanitised name plus a digest of the
+    definition, so it never collides. Every distinct definition compiles
     its own kernels, kept for the life of the process."""
     from .hybrid import LAWS
+    name = law.name
     for reg in LAWS.values():
         if reg.definition == law.definition:
-            return reg.name
-    safe = re.sub(r"[^0-9A-Za-z_]", "_", law.name)
+            name = reg.name
+            if re.fullmatch(r"[0-9A-Za-z_]+", name):
+                return name
+            break
+    safe = re.sub(r"[^0-9A-Za-z_]", "_", name)
     digest = hashlib.sha1(repr(law.definition).encode()).hexdigest()[:10]
     return f"{safe}_{digest}"
 

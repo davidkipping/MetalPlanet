@@ -5,6 +5,42 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.12.2] — 2026-10-10
+
+Code-review round on 0.12.1.
+
+### Fixed
+- **A registered law whose name is not a Metal identifier aborted the
+  interpreter** (e.g. `hybrid.LAWS["my-law"]`): 0.12.1 sanitised kernel
+  names only for unregistered laws. Every kernel-name fragment is now a
+  valid identifier -- a registered name that already is one (hybrid2/4/5)
+  is kept, so their kernels are unchanged; anything else is sanitised and
+  given a digest of the definition.
+- **A law name and its equal law object counted as different laws**:
+  a model built with `"hybrid2"` raised "law changed" when called with
+  `metalplanet.HYBRID2`, and the reverse. `_check_law` compares the
+  resolved laws' definitions.
+- **A model re-read the registry on every new graph trace**, so re-binding
+  or deleting a registered name after construction could make one model
+  trace two laws, or fail. `TransitModel` resolves its hybrid law once, at
+  construction; a name the registry has since re-bound to another
+  definition is "law changed", and the model's own law keeps working.
+
+### Changed
+- `hybrid.find_law` is the one law resolver (a HybridLaw as is, a
+  registry name read at call time, or None); `get_law` raises on None and
+  the frontend uses it directly -- its private copy is gone.
+
+### Tests
+- The fp64 custom-law `TransitModel` test checks against `flux_dev_hybrid`
+  on the orbit's separations (it compared a model with an identical one).
+- The renamed-law kernel-sharing test counts the tau cores as well as the
+  z kernels, and its always-true clause is gone.
+- New: a name and its equal law object, both ways; a model keeping its law
+  through registry re-binding and deletion (including a graph traced only
+  afterwards); a registered non-identifier name, in a subprocess. All three
+  fail on 0.12.1.
+
 ## [0.12.1] — 2026-10-10
 
 Code-review round on 0.12.0.

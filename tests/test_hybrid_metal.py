@@ -663,8 +663,41 @@ def test_a_renamed_registered_law_shares_its_kernels():
     copy = HybridLaw("mine", HYBRID2.eps, HYBRID2.shapes)
     assert _law_tag(copy) == "hybrid2" and copy.definition == HYBRID2.definition
     z = mx.array(np.linspace(0.0, 1.15, 200, dtype=np.float32))
-    n0 = len(M._kernels)
-    a = np.asarray(flux_dev_metal_hybrid(z, 0.1, "hybrid2", [0.3, 0.2]))
-    n1 = len(M._kernels)
-    b = np.asarray(flux_dev_metal_hybrid(z, 0.1, copy, [0.3, 0.2]))
-    assert np.array_equal(a, b) and len(M._kernels) == n1 >= n0
+    tau = mx.array(np.linspace(-0.12, 0.12, 200, dtype=np.float32))
+    w = [0.3, 0.2]
+
+    def both(law):
+        zz = np.asarray(flux_dev_metal_hybrid(z, 0.1, law, w))
+        tt = np.asarray(flux_dev_from_tau(tau, 3.45, 8.8, 0.3, 0.1,
+                                          limb_dark=law, u=w,
+                                          exp_time=0.02, integration="contact"))
+        return zz, tt
+
+    a = both("hybrid2")                    # compiles (or reuses) hybrid2's
+    nk, nc = len(M._kernels), len(M._tau_cores)
+    b = both(copy)                         # must compile nothing new
+    assert len(M._kernels) == nk and len(M._tau_cores) == nc
+    assert all(np.array_equal(x, y) for x, y in zip(a, b))
+
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+def test_a_registered_name_need_not_be_a_metal_identifier():
+    """A registered law named "my-law" aborted the interpreter in 0.12.1
+    (its name went into the Metal kernel name unsanitised). Run in a
+    subprocess so a regression fails this test, not the whole session."""
+    import subprocess
+    import sys
+    code = (
+        "import numpy as np, mlx.core as mx\n"
+        "from metalplanet import hybrid as H\n"
+        "from metalplanet.metal_hybrid import flux_dev_metal_hybrid\n"
+        "H.LAWS['my-law'] = H.HybridLaw('my-law', (0.3,), ((1, -1, 0),))\n"
+        "z = mx.array(np.linspace(0.0, 1.15, 64, dtype=np.float32))\n"
+        "k = np.asarray(flux_dev_metal_hybrid(z, 0.1, 'my-law', [0.3, 0.2]))\n"
+        "g = np.asarray(H.flux_dev_hybrid(z, 0.1, [0.3, 0.2], 'my-law'))\n"
+        "assert np.abs(k - g).max() < 1e-6\n"
+        "print('ok')\n")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                       text=True, timeout=300)
+    assert r.returncode == 0 and r.stdout.strip().endswith("ok"), r.stderr[-500:]
