@@ -88,7 +88,12 @@ def sn_dev_poly(z: mx.array, r, n_max: int) -> list:
     # floored denominator gives a finite value but an overflowing VJP, and
     # the mask's zero cotangent then yields 0 * inf = NaN.
     one = zero + 1.0
-    fourzr_p = mx.where(m_part, fourzr, one)
+    # Total occultation (r > 1) is a partial-mask lane: kite = kap0 = 0
+    # there (sn_dev_with_aux), so M_0 = M_2 = 0 and, with k^2 at its floor,
+    # M_1, M_3 and every s_n (n >= 3) come out ~1e-270 -- the full-disk 0.
+    # Its 4zr vanishes at z = 0, hence the mask here (0 * inf in the VJP).
+    fourzr_p = mx.where(mx.logical_and(m_part, mx.logical_not(aux["m_tot"])),
+                        fourzr, one)
     onembmr2_c = mx.where(m_comp, onembmr2, one)
     k2 = onembmr2 / fourzr_p            # only read on partial lanes
     k2inv = fourzr / onembmr2_c         # only read on complete lanes

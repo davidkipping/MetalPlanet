@@ -112,7 +112,8 @@ _CORE = """
     bool m_comp = z <= 1.0f - r;
     bool m_ps = zpr > 1.0f;
     bool m_req = fabs(dzr) < 10.0f * EPS;
-    bool m_con = fabs(zpr - 1.0f) < D_CON;
+    bool m_con = fabs(zpr - 1.0f) < D_CON && r <= 1.0f;
+    bool m_tot = z <= r - 1.0f;     // total occultation: r > 1 only
 
     float onembmr2 = (r + 1.0f - z) * (1.0f - r + z);
     float onembpr2 = (1.0f - z - r) * (1.0f + z + r);
@@ -243,6 +244,14 @@ _CORE = """
         s1d = -(lam + (z < r ? MP_TWO_PI : 0.0f)) / 3.0f;
     }
 
+    if (m_tot) {
+        // the whole disc covered: full-disk values, assigned (not
+        // corrected), so nothing the partial branch did above can leak
+        s0d = -MP_PI;
+        s1d = -MP_TWO_PI / 3.0f;
+        s2d = 0.0f;
+    }
+
     float gc0 = 1.0f - u1 - 1.5f * u2;
     float gc1 = u1 + 2.0f * u2;
     float gc2 = -0.25f * u2;
@@ -277,6 +286,10 @@ _PHOT_PARTIALS = '''
         float sq1 = metal::precise::sqrt(onembmr2);
         ds1dr = -4.0f * r * sq1 * E_;
         ds1dz = -(4.0f / 3.0f) * r * sq1 * (E_ - 2.0f * Em);
+    }
+    if (m_tot) {
+        ds0dz = 0.0f; ds0dr = 0.0f; ds1dz = 0.0f;
+        ds1dr = 0.0f; ds2dz = 0.0f; ds2dr = 0.0f;
     }
 '''
 

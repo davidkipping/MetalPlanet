@@ -68,6 +68,24 @@ KERNEL_ENTRIES = {
     "tau/hybrid_basis": (mp.flux_dev_from_tau, "tau", TAU, GEO,
                          {"limb_dark": "hybrid4", "ld_basis": True}, "th"),
 }
+# Occultors larger than the star (0.11.0): a total occultation through
+# every kernel family, so each calling form also runs the r > 1 branches.
+ZW = np.linspace(0.0, 9.0, 64)                      # total, partial, none
+GEO_WD = [("period", 1.4079), ("a", 336.0), ("b", 3.0), ("r", 7.28)]
+TAU_WD = np.linspace(-0.012, 0.012, 64)
+KERNEL_ENTRIES.update({
+    "z/quad r>1": (mp.flux_dev_metal, "z", ZW, [("r", 7.28)] + QUAD, {},
+                   "zq"),
+    "z/ld_basis r>1": (mp.flux_dev_metal, "z", ZW, [("r", 7.28)],
+                       {"ld_basis": True}, "zb"),
+    "z-hybrid-entry r>1": (flux_dev_metal_hybrid, "z", ZW,
+                           [("r", 7.28), ("law", "hybrid4"), ("u", W4)], {},
+                           "zh"),
+    "tau/quad_contact r>1": (mp.flux_dev_from_tau, "tau", TAU_WD,
+                             GEO_WD + QUAD, {"exp_time": 0.0014}, "tq"),
+    "tau/hybrid_ecc r>1": (mp.flux_dev_from_tau, "tau", TAU_WD, GEO_WD,
+                           dict(HYB, secosw=0.3, sesinw=0.2), "th"),
+})
 GRAPH_ENTRIES = {
     "flux_dev": (mp.flux_dev, "z", Z, [("r", 0.1)] + QUAD, {}, None),
     "light_curve": (mp.light_curve, "z", Z, [("r", 0.1)] + QUAD, {}, None),
@@ -82,7 +100,27 @@ GRAPH_ENTRIES = {
     "flux_dev_analytic": (mp.flux_dev_analytic, "z", Z,
                           [("r", 0.1)] + QUAD, {}, None),
 }
+GRAPH_ENTRIES.update({
+    "flux_dev r>1": (mp.flux_dev, "z", ZW, [("r", 7.28)] + QUAD, {}, None),
+    "flux_dev_hybrid r>1": (mp.flux_dev_hybrid, "z", ZW,
+                            [("r", 7.28), ("w", W4), ("law", "hybrid4")], {},
+                            None),
+})
 ALL = {**KERNEL_ENTRIES, **GRAPH_ENTRIES}
+
+
+def _r0(entry):
+    """The entry's own radius: tests that vary r scale it from here, so an
+    r > 1 row is exercised at r > 1."""
+    return float(dict(ALL[entry][3])["r"])
+
+
+def _fp32_tol(entry):
+    """Route-to-route fp32 agreement: 2.5e-7 for r < 1. An occultor larger
+    than the star cancels terms of size ~r (the fp32 error grows ~ r^2), and
+    on its 100%-deep, steep eclipse an ulp moved in a contact time shows:
+    the documented fp32 budget there (test_large_occultor.TOL32)."""
+    return 2.5e-7 if _r0(entry) < 1.0 else 2e-5
 
 
 def _first(out):
@@ -218,8 +256,8 @@ def test_kernel_entries_cast_fp64_parameters_to_fp32_data(entry, stream):
     d = mx.array(ALL[entry][2], dtype=mx.float32)
     ctx = mx.stream(mx.cpu) if stream == "cpu" else contextlib.nullcontext()
     with ctx:
-        got = _np(_call(entry, d, _with(entry, r=mx.array(0.1, mx.float64))))
-        ref = _np(_call(entry, d, _with(entry, r=mx.array(0.1, mx.float32))))
+        got = _np(_call(entry, d, _with(entry, r=mx.array(_r0(entry), mx.float64))))
+        ref = _np(_call(entry, d, _with(entry, r=mx.array(_r0(entry), mx.float32))))
     assert got.dtype == np.float32
     assert np.array_equal(got, ref)
 
@@ -232,7 +270,7 @@ def test_fp32_data_with_fp64_parameters_takes_the_kernel(entry):
     is reached on the default stream, and not on the CPU stream."""
     family = ALL[entry][5]
     d = mx.array(ALL[entry][2], dtype=mx.float32)
-    p = _with(entry, r=mx.array(0.1, mx.float64))
+    p = _with(entry, r=mx.array(_r0(entry), mx.float64))
     with kernel_spy() as seen:
         _np(_call(entry, d, p))
     assert family in seen
@@ -246,9 +284,9 @@ def test_kernel_entries_cast_fp32_parameters_to_fp64_data(entry):
     """The reverse: fp64 data with an fp32 radius is fp64 throughout, the
     radius widened exactly (bitwise the fp64 call with that fp32 value)."""
     d = mx.array(ALL[entry][2], dtype=mx.float64)
-    r32 = mx.array(0.1, dtype=mx.float32)
+    r32 = mx.array(_r0(entry), dtype=mx.float32)
     got = _np(_call(entry, d, _with(entry, r=r32)))
-    ref = _np(_call(entry, d, _with(entry, r=float(np.float32(0.1)))))
+    ref = _np(_call(entry, d, _with(entry, r=float(np.float32(_r0(entry))))))
     assert got.dtype == np.float64
     assert np.array_equal(got, ref)
 
@@ -262,7 +300,7 @@ def test_graph_entries_promote_as_mlx_does(entry, stream):
     d = mx.array(ALL[entry][2], dtype=mx.float32)
     ctx = mx.stream(mx.cpu) if stream == "cpu" else contextlib.nullcontext()
     with ctx:
-        got = _np(_call(entry, d, _with(entry, r=mx.array(0.1, mx.float64))))
+        got = _np(_call(entry, d, _with(entry, r=mx.array(_r0(entry), mx.float64))))
     assert got.dtype == np.float64 and np.isfinite(got).all()
 
 
@@ -276,13 +314,13 @@ def test_kernel_entries_take_rows_with_per_row_parameters(entry):
     the j-th parameter value."""
     base = ALL[entry][2]
     d2 = mx.array(np.stack([base, base]), dtype=mx.float32)
-    rs = [0.1, 0.12]
+    rs = [_r0(entry), 1.2 * _r0(entry)]
     got = _np(_call(entry, d2, _with(entry, r=mx.array(rs, mx.float32))))
     for j, rj in enumerate(rs):
         row = _np(_call(entry, mx.array(base, dtype=mx.float32),
                         _with(entry, r=rj)))
         assert np.abs(got[j].astype(np.float64)
-                      - row.astype(np.float64)).max() <= 2.5e-7, j
+                      - row.astype(np.float64)).max() <= _fp32_tol(entry), j
 
 
 @pytest.mark.parametrize("entry", list(GRAPH_ENTRIES))
@@ -293,8 +331,9 @@ def test_graph_entries_broadcast(entry):
     base = ALL[entry][2]
     d2 = mx.array(np.stack([base, base]), dtype=mx.float32)
     got = _np(_call(entry, d2, _with(
-        entry, r=mx.array([[0.1], [0.12]], dtype=mx.float32))))
-    for j, rj in enumerate([0.1, 0.12]):
+        entry, r=mx.array([[_r0(entry)], [1.2 * _r0(entry)]],
+                           dtype=mx.float32))))
+    for j, rj in enumerate([_r0(entry), 1.2 * _r0(entry)]):
         row = _np(_call(entry, mx.array(base, dtype=mx.float32),
                         _with(entry, r=mx.array(rj, dtype=mx.float32))))
         assert np.array_equal(got[j], row), j
@@ -319,13 +358,13 @@ def test_grad_fp32_on_the_default_stream_and_fp64_on_the_cpu_stream(entry):
     pass before 0.10.7."""
     base = ALL[entry][2]
     g32 = mx.grad(_loss(entry, mx.array(base, dtype=mx.float32)))(
-        mx.array(0.1, dtype=mx.float32))
+        mx.array(_r0(entry), dtype=mx.float32))
     # evaluated before the CPU block: MLX cannot evaluate a pending GPU
     # fp32 graph and a CPU fp64 graph in one mx.eval made there
     mx.eval(g32)
     with mx.stream(mx.cpu):
         g64 = mx.grad(_loss(entry, mx.array(base, dtype=mx.float64)))(
-            mx.array(0.1, dtype=mx.float64))
+            mx.array(_r0(entry), dtype=mx.float64))
         mx.eval(g64)
     a, b = float(g32.item()), float(g64.item())
     assert np.isfinite(a) and np.isfinite(b)
@@ -341,8 +380,8 @@ def test_grad_in_an_fp64_parameter_with_fp32_data(entry):
     all-fp32 one on the CPU stream: the cast is the identity map's."""
     d = mx.array(ALL[entry][2], dtype=mx.float32)
     with mx.stream(mx.cpu):
-        g = mx.grad(_loss(entry, d))(mx.array(0.1, dtype=mx.float64))
-        g32 = mx.grad(_loss(entry, d))(mx.array(0.1, dtype=mx.float32))
+        g = mx.grad(_loss(entry, d))(mx.array(_r0(entry), dtype=mx.float64))
+        g32 = mx.grad(_loss(entry, d))(mx.array(_r0(entry), dtype=mx.float32))
         mx.eval(g)
         mx.eval(g32)
     assert g.dtype == mx.float64
@@ -354,9 +393,9 @@ def test_compile_equals_eager(entry):
     d = mx.array(ALL[entry][2], dtype=mx.float32)
     eager = _np(_call(entry, d))
     comp = mx.compile(lambda r: _first(_call(entry, d, _with(entry, r=r))))
-    got = _np(comp(mx.array(0.1, dtype=mx.float32)))
+    got = _np(comp(mx.array(_r0(entry), dtype=mx.float32)))
     assert np.abs(got.astype(np.float64)
-                  - eager.astype(np.float64)).max() <= 2.5e-7
+                  - eager.astype(np.float64)).max() <= _fp32_tol(entry)
 
 
 # ---------------------------------------------------------------------------

@@ -237,6 +237,7 @@ def lens_geometry(z: mx.array, r):
     m_none = z >= 1.0 + r
     m_comp = mx.logical_and(z <= 1.0 - r, mx.logical_not(m_none))
     m_part = mx.logical_not(mx.logical_or(m_none, m_comp))
+    m_tot = z <= r - 1.0              # total occultation, r > 1 only
     one = zero + 1.0
 
     A = mx.maximum((r + 1.0 - z) * (1.0 - r + z), tiny)     # 1 - (z-r)^2
@@ -244,16 +245,25 @@ def lens_geometry(z: mx.array, r):
     sqarea = _kite_sqarea(z, r)                              # signed Heron
     kite_floor = (10.0 * eps) ** 2
     kite_safe = mx.sqrt(mx.where(m_part, mx.maximum(sqarea, kite_floor), 1.0))
-    kite = mx.where(m_part, kite_safe, 0.0)
+    # Total occultation (r > 1) shares the partial mask; there the lens is
+    # the whole disc and kite = 0, which makes every column below land
+    # exactly on its full-disk value with zero partials: kap0 = 0,
+    # kap1 = pi, M0 = M2 = M4 = 0, and the pole's J = 0 (y = 0 -> series).
+    # Done here, upstream, rather than by selecting constants at the end:
+    # output-level selects changed MLX's fusion of the compiled frontend
+    # graphs and moved r < 1 results by an ulp.
+    m_lens = mx.logical_and(m_part, mx.logical_not(m_tot))
+    kite = mx.where(m_lens, kite_safe, 0.0)
     kap0 = mx.arctan2(kite, r2 + z2 - 1.0)      # pi complete, 0 outside
     kap1 = mx.arctan2(kite, 1.0 + z2 - r2)
 
     # sin and cos of kap0 from the geometry, not from trig
-    twozr = mx.where(m_part, mx.maximum(2.0 * z * r, tiny), one)
-    sink = mx.where(m_part, kite / twozr, 0.0)
-    cosk = mx.where(m_part, (r2 + z2 - 1.0) / twozr, -one)
+    twozr = mx.where(m_lens, mx.maximum(2.0 * z * r, tiny), one)
+    sink = mx.where(m_lens, kite / twozr, 0.0)
+    cosk = mx.where(m_lens, (r2 + z2 - 1.0) / twozr, -one)
     return dict(z=z, r=r, r2=r2, z2=z2, zero=zero, one=one, tiny=tiny,
-                m_none=m_none, m_comp=m_comp, m_part=m_part,
+                m_none=m_none, m_comp=m_comp, m_part=m_part, m_tot=m_tot,
+                m_lens=m_lens,
                 A=A, Bp=Bp, sqarea=sqarea, kite=kite, kap0=kap0, kap1=kap1,
                 sink=sink, cosk=cosk)
 
@@ -333,7 +343,15 @@ def _pole_terms(g, eps: float):
     # fp32 resolution, and the three large terms of occ_p only cancel
     # if they see the same rounded lens. A itself enters only through
     # eps + A, which is insensitive there.
-    nBp = mx.where(m_part, -Bp, one)
+    # -Bp >= 0 on partial lanes, but where z + r rounds to exactly 1 it is
+    # -0.0: ratio = (eps + Bp)/nBp then flips to -inf, the lane drops into
+    # the log form and sqrt(-Q) is NaN (fp32, ~1 point in 10 within two
+    # ulps of the internal contact; v0.10.7 and before). There the depth
+    # is kite^2 / A (kite^2 = A (-Bp)), which is what kite already carries.
+    nBp = mx.where(m_part, mx.where(-Bp > 0.0, -Bp,
+                                    kite * kite / mx.where(g["m_lens"], A,
+                                                           one)),
+                   one)
     apb = eps + A                                   # a_ + b_, > 0 always
     U = mx.where(m_part, apb * nBp, one)
     ratio = (eps + Bp) / nBp                        # V = ratio * kite^2
@@ -366,7 +384,7 @@ def _pole_terms(g, eps: float):
     # from Q = 0, through the series (bounded T) on the bridge
     Qs = mx.where(m_ser, one, mx.where(m_part, Q, one))
     J2_cl = (a_ * J - 2.0 * kite / eps) / Qs
-    zre2 = mx.where(m_part, mx.maximum(z * r * eps, g["tiny"]), one)
+    zre2 = mx.where(g["m_lens"], mx.maximum(z * r * eps, g["tiny"]), one)
     J2c_cl = (a_ * kite / zre2 - b_ * J) / Qs
     T2 = T * T
     J2_ser = 4.0 * T / (apb * apb) * (G - 2.0 * b_ * T2 * Gp / apb)

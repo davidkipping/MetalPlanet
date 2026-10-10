@@ -82,11 +82,17 @@ inline void mp_hyb_gen(float z, float r, thread float *G,
     float sqarea = (sa + (sb + sc)) * (sc - (sa - sb))
                  * (sc + (sa - sb)) * (sa + (sb - sc));
     float kite = 0.0f, kap0 = MP_PI, kap1 = 0.0f, sink = 0.0f, cosk = -1.0f;
+    // Total occultation (r > 1) runs the partial branch with kite = 0, as
+    // hybrid.lens_geometry does: kap0 = 0 and kap1 = pi exactly, so s0d,
+    // s2d, M0..M4 and each pole's J (y = 0 -> series, T = 0) land on the
+    // full-disk values with zero partials -- no branch, no early return
+    // (an early return here cost the forward kernels 1.35-1.65x).
+    bool tot = z <= r - 1.0f;
     if (!comp) {
-        kite = metal::precise::sqrt(max(sqarea, KITE_FLOOR));
+        kite = tot ? 0.0f : metal::precise::sqrt(max(sqarea, KITE_FLOOR));
         kap0 = metal::precise::atan2(kite, r2 + z2 - 1.0f);
         kap1 = metal::precise::atan2(kite, 1.0f + z2 - r2);
-        float tzr = 2.0f * z * r;
+        float tzr = max(2.0f * z * r, 1e-30f);    // z = 0: total lanes only
         sink = kite / tzr;
         cosk = (r2 + z2 - 1.0f) / tzr;
     }
@@ -135,10 +141,13 @@ inline void mp_hyb_gen(float z, float r, thread float *G,
             dz = 4.0f * MP_PI * z * r2 / Q32;
             dr = MP_TWO_PI * r * a_ / Q32;
         } else {
-            float nBp = -Bp, apb = e + A;
+            // -Bp is -0.0 where z + r rounds to 1: the depth is then
+            // kite^2 / A (see hybrid._pole_terms)
+            float nBp = Bp < 0.0f ? -Bp : kite * kite / A;
+            float apb = e + A;
             float U = apb * nBp;
             float ratio = (e + Bp) / nBp;           // V = ratio * kite^2
-            float y = ratio * kite * kite / U;
+            float y = tot ? 0.0f : ratio * kite * kite / U;
             float J, J2, J2c;
             if (y > YSW) {
                 J = 4.0f / metal::precise::sqrt(Q)
@@ -161,7 +170,7 @@ inline void mp_hyb_gen(float z, float r, thread float *G,
                          + y2 * y2 / 9.0f - y * y2 * y2 / 11.0f;
                 float Gp = -1.0f / 3.0f + 2.0f * y / 5.0f - 3.0f * y2 / 7.0f
                          + 4.0f * y * y2 / 9.0f - 5.0f * y2 * y2 / 11.0f;
-                float T2 = T * T, ia = 1.0f / apb;
+                float T2 = T * T, ia = tot ? 0.0f : 1.0f / apb;
                 J = 4.0f * T * Gs * ia;
                 J2 = 4.0f * T * ia * ia * (Gs - 2.0f * beta * T2 * Gp * ia);
                 J2c = 4.0f * T * ia * ia * (Gs + 2.0f * a_ * T2 * Gp * ia);

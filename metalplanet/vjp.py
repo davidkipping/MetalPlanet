@@ -101,6 +101,11 @@ def sn_partials(z: mx.array, r, aux):
     ds2dz = mx.where(m_part, ds2dz_part,
                      mx.where(m_comp, ds2dz_comp, 0.0))
 
+    # total occultation (r > 1): constant full-disk values, zero partials
+    m_tot = aux["m_tot"]
+    ds0dz, ds0dr, ds1dz, ds1dr, ds2dz, ds2dr = (
+        mx.where(m_tot, zero, d)
+        for d in (ds0dz, ds0dr, ds1dz, ds1dr, ds2dz, ds2dr))
     return ds0dz, ds0dr, ds1dz, ds1dr, ds2dz, ds2dr
 
 

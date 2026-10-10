@@ -5,6 +5,71 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+### Added
+- **Occultors larger than the star: `rp > 1`** (white-dwarf hosts; WD
+  1856+534 b has Rp/R* = 7.28). Every entry point and law, fp64 and fp32,
+  with gradients. A fourth regime, **total occultation** (z <= rp - 1):
+  F = 0 exactly and every gradient is zero, on the graph and in every
+  kernel family. Measured against a direct integral of the occulted
+  intensity (`tests/test_large_occultor.py`, 101 tests):
+
+  | rp | fp64 graph (quadratic / polynomial / hybrid) | fp32 kernels (partial overlap) |
+  |---|---|---|
+  | 1.5 | 2e-16 | 8e-8 |
+  | 7.28 | 6e-15 / 7e-14 / 1e-14 | 3-9e-6 |
+  | 20 | 8e-14 / 2e-11 / 1e-13 | 1e-4 |
+  | 50 | 3e-12 / 1e-9 / 4e-12 | 2e-3 |
+
+  The fp32 partial-overlap error grows ~ rp^2 (terms of size ~rp cancel
+  to order 1): use fp64 above rp ~ 10. README section "rp > 1"; anvil's
+  `make_transit_target` docs give the bounds to widen.
+
+### Fixed
+- **The far-side push** (`orbit.separation_circular`, `api._photom`
+  primary and secondary) moved points behind the star to 2 + z, which
+  clears it only for rp <= 1: an occultor larger than the star with
+  b < rp - 1 got a full eclipse at the far conjunction (fp64 graph; the
+  kernels test the far side explicitly and were right). Now z + 2a and
+  z + 2 (1 + rp).
+- **No total-occultation branch in the fp32 kernels.** The quadratic
+  core returned NaN at z = 0, errors up to 17 for 0 < z < rp - 1, and
+  inf at rp = 1.001 -- in the z, tau, model and basis kernels alike. The
+  core now assigns the full-disk values (s0d, s1d, s2d) = (-pi, -2 pi/3,
+  0) and zero partials on those lanes, after the general path; the
+  hybrid kernel zeroes the lens (kite = 0) so its general formulas land
+  there exactly, branch-free.
+- **fp32 hybrid laws returned NaN at the internal contact** (pre-existing
+  since 0.10.0, found by this release's r < 1 gate): where z + r rounds
+  to exactly 1, the lens depth -Bp was -0.0, the pole's ratio flipped to
+  -inf and the lane took sqrt(-Q) -- NaN in every column (generator
+  mixing), graph and kernel alike, about 1 point in 10 within two ulps
+  of the contact. The depth there is now kite^2 / A, which kite already
+  carries.
+- The contact Taylor switch (|z + r - 1| < sqrt(eps)) is guarded to
+  r <= 1, where its sqrt(r (1 - r)) is defined.
+
+### Changed
+- **Total occultation is handled upstream on the graph**: the lens kite
+  is zeroed on those lanes, so kap0 = 0 and kap1 = pi exactly and the
+  existing formulas give the full-disk values with zero gradients
+  (finite at z = 0, where two masked divisions were made 1/1). Selecting
+  constants at the outputs instead changed MLX's fusion of the compiled
+  polynomial frontend graph and moved r < 1 results by 1-2 ulp.
+- Contact docstrings and `exposure.contact_offsets[_anchored]` name the
+  inner pair |1 - r|. (The solver only ever used Z^2, so the contacts were
+  always right; the deep-eclipse contact-rule error, 1e-5 at n_gl = 5,
+  is ordinary quadrature resolution and falls below 1e-6 at n_gl = 9.)
+
+### Gates
+- r < 1 untouched: the 296-array release corpus bitwise; every fp32
+  kernel family's outputs and VJPs (146 arrays) and the hybrid graph
+  (120 arrays) bitwise except the internal-contact NaNs fixed above. The
+  kernel *sources* change by design (the 18-source byte gate retired for
+  this release, replaced by the output gates).
+- `tests/test_entry_contract.py` gains r > 1 rows for every kernel
+  family and two graph functions; its radius-varying tests now scale
+  from each entry's own radius and its fp32 tolerances with it.
+
 ## [0.10.7] — 2026-10-08
 
 Code-review round on 0.10.6, plus a sweep of every public entry point

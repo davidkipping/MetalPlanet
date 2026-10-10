@@ -344,6 +344,50 @@ gradients and lands level with quadratic's value+grad while being as
 accurate as the Claret four-parameter law. `flux_dev_metal(z, r,
 limb_dark=..., u=...)` has the same kernels for the z-input path.
 
+## Occultors larger than the star: `rp > 1`
+
+White-dwarf hosts put the companion's radius well above the star's
+(WD 1856+534 b: Rp/R* = 7.28). Every entry point takes `rp > 1`, every
+limb-darkening law, fp64 and fp32, with gradients. A fourth regime
+appears beside none, partial and complete: **total occultation**,
+z <= rp - 1, where the white dwarf is fully covered, F = 0 exactly and
+every gradient is zero.
+
+```python
+import math, numpy as np, metalplanet as mp
+p = mp.TransitParams()
+p.t0, p.per, p.rp, p.a = 0.0, 1.4079, 7.28, 336.0        # WD 1856+534 b-like
+p.inc = math.degrees(math.acos(7.79 / p.a))              # b = 7.79: grazing
+p.ecc, p.w, p.limb_dark, p.u = 0.0, 90.0, "quadratic", [0.4, 0.25]
+t = np.linspace(-0.01, 0.01, 2001)                       # an ~8-minute transit
+flux = mp.TransitModel(p, t).light_curve(p)              # fp64: exact
+```
+
+Accuracy against a direct integral of the occulted intensity:
+
+| rp | fp64 graph (quadratic / polynomial / hybrid) | fp32 kernels, partial overlap |
+|---|---|---|
+| 1.5 | 2e-16 | 8e-8 |
+| 7.28 | 6e-15 / 7e-14 / 1e-14 | 3-9e-6 |
+| 20 | 8e-14 / 2e-11 / 1e-13 | 1e-4 |
+| 50 | 3e-12 / 1e-9 / 4e-12 | 2e-3 |
+
+Total occultation is exact in both precisions. In partial overlap the
+fp32 error grows as rp squared: terms of size ~rp cancel to order 1.
+**Use fp64 above rp ~ 10**, or budget the table's error. Two other
+things to know:
+
+- **Exposure integration.** The contact rule converges as for a planet,
+  but a 100%-deep eclipse makes its absolute error 100x larger: about
+  1e-5 at n_gl = 5 for a 2-minute exposure of an 8-minute eclipse, and
+  under 1e-6 at n_gl = 9.
+- **Sampler bounds.** The anvil targets' default box caps r at 0.5, b at
+  1.2 and a at 200; for WD 1856+534 b pass e.g. `bounds={"r": (1.0, 12.0),
+  "b": (0.0, 13.0), "a": (1.5, 1000.0)}` to `make_transit_target`.
+
+rp = 1 exactly is a degenerate point, where the contacts meet at z = 0:
+5e-9 in fp64 and 1e-4 in fp32, finite everywhere.
+
 ## Sampling per-transit times: `flux_dev_from_tau`
 
 The fused model kernel (`make_quad_transit_flux`) derives each point's

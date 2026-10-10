@@ -329,7 +329,9 @@ class TransitModel:
 
     def _photom(self, z, front, rp, u1, u2, fp, uvec=None):
         if self.transittype == "primary":
-            z_eff = mx.where(front, z, 2.0 + z)
+            # far side pushed past 1 + rp for any rp (2 + z cleared the
+            # star only for rp <= 1)
+            z_eff = mx.where(front, z, z + 2.0 * (1.0 + rp))
             if uvec is not None:          # a vector law: polynomial or hybrid
                 if self.limb_dark == "polynomial":
                     return 1.0 + flux_dev_poly(z_eff, rp, uvec,
@@ -337,7 +339,7 @@ class TransitModel:
                 return 1.0 + self._hybrid_dev(z_eff, rp, uvec)
             core = flux_dev_metal if self.use_metal else flux_dev
             return 1.0 + core(z_eff, rp, u1, u2)
-        z_eff = mx.where(front, 2.0 + z, z)
+        z_eff = mx.where(front, z + 2.0 * (1.0 + rp), z)
         s0d, _, _ = sn_dev(z_eff, rp)
         # visible fraction of the (uniform) planet disk
         return 1.0 + fp * (1.0 + s0d / (math.pi * rp * rp))

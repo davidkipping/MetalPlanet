@@ -47,7 +47,10 @@ Outside those slivers the generic cel-based formulas are well-conditioned
 (b1 ~ (z-r) and sqrt(p) ~ |z-r| shrink together, so their ratio is exact
 to rounding).
 
-Assumes 0 < r < 1 (no total occultation branch) and z >= 0.
+Any r > 0 and z >= 0. For r > 1 (an occultor larger than the star,
+e.g. a white-dwarf host) a fourth regime appears, total occultation
+(z <= r - 1), where every term takes its full-disk value: s0d = -pi,
+s1d = -2 pi/3, s2d = 0, with zero partials (m_tot).
 """
 
 from __future__ import annotations
@@ -114,6 +117,12 @@ def sn_dev_with_aux(z: mx.array, r):
     m_ps = z + r > 1.0                       # "partial side": k^2 < 1
     m_req = mx.logical_and(mx.abs(z - r) < d_req, m_occ)
     m_con = mx.logical_and(mx.abs(z + r - 1.0) < d_con, m_occ)
+    # the contact z + r = 1 (k^2 = 1) exists only for r <= 1; for r > 1 the
+    # switch would read sqrt(r (1 - r)) out of its domain. (r == 1 keeps
+    # it: z = 0 is then both the contact and the onset of total
+    # occultation, and the generic forms divide by zero there.)
+    m_con = mx.logical_and(m_con, r <= 1.0)
+    m_tot = z <= r - 1.0                     # total occultation (r > 1)
 
     # ---- shared geometry (sanitized once, used by every branch) ----------
     onembmr2 = mx.maximum((r + 1.0 - z) * (1.0 - r + z), tiny)   # 1-(z-r)^2
@@ -127,7 +136,15 @@ def sn_dev_with_aux(z: mx.array, r):
     sqarea = _kite_sqarea(z, r)
     kite_floor = (10.0 * eps) ** 2
     kite_safe = mx.sqrt(mx.where(m_part, mx.maximum(sqarea, kite_floor), 1.0))
-    kite = mx.where(m_part, kite_safe, 0.0)
+    # Total occultation (r > 1) shares the partial mask. There kite = 0, so
+    # kap0 = 0 and kap1 = pi exactly and the partial formulas give the
+    # full-disk s0d = -pi, s2d = 0 by construction, with zero gradients; s1d
+    # reaches -2 pi/3 exactly through the clipped kc^2 = 1 below. Done
+    # upstream, not by selecting constants at the end: output-level selects
+    # changed MLX's fusion of the compiled polynomial graph and moved r < 1
+    # results by 1-2 ulp. Unreachable for r < 1.
+    kite = mx.where(mx.logical_and(m_part, mx.logical_not(m_tot)),
+                    kite_safe, 0.0)
     kap0 = mx.arctan2(kite, r2 + z2 - 1.0)        # angle at planet center
     kap1 = mx.arctan2(kite, 1.0 + z2 - r2)        # angle at star center
 
@@ -152,11 +169,16 @@ def sn_dev_with_aux(z: mx.array, r):
     # masked away — and 0 * inf = NaN. So every masked division gets its
     # denominator replaced by 1 where the branch is inactive (the forward
     # value there is irrelevant; the gradient becomes a clean 0).
-    fourzr_ps = mx.where(m_ps, fourzr, 1.0)
+    # Total occultation (r > 1) sits on the partial side with kc^2 >= 1,
+    # clipped to 1; there the division is made 1/1, since at z = 0 the
+    # floored 4zr would square to 0 in the VJP (inf * 0 = NaN).
+    fourzr_ps = mx.where(mx.logical_and(m_ps, mx.logical_not(m_tot)),
+                         fourzr, 1.0)
     on_mr_cs = mx.where(m_ps, 1.0, onembmr2)
     # true range of kc^2 is [0, 1] in-branch; the clip keeps the inactive
     # branch from feeding cel out-of-range kc
-    kc2_ps = mx.clip(mx.where(m_ps, -onembpr2, 0.0) / fourzr_ps, 0.0, 1.0)
+    kc2_ps = mx.clip(mx.where(m_ps, mx.where(m_tot, 1.0, -onembpr2), 0.0)
+                     / fourzr_ps, 0.0, 1.0)
     kc2_cs = mx.clip(mx.where(m_ps, 0.0, onembpr2) / on_mr_cs, 0.0, 1.0)
     kc2 = mx.where(m_ps, kc2_ps, kc2_cs)
     kc = mx.sqrt(mx.maximum(kc2, tiny))
@@ -219,7 +241,7 @@ def sn_dev_with_aux(z: mx.array, r):
 
     aux = {
         "m_none": m_none, "m_comp": m_comp, "m_part": m_part,
-        "m_ps": m_ps, "m_req": m_req, "m_con": m_con,
+        "m_ps": m_ps, "m_req": m_req, "m_con": m_con, "m_tot": m_tot,
         "kap0": kap0, "kap1": kap1, "kite": kite,
         "Eofk": Eofk, "Em1mKdm": Em1mKdm,
         "onembmr2": onembmr2, "sqonembmr2": sqonembmr2, "sqbr": sqbr,

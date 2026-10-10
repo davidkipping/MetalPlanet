@@ -58,10 +58,12 @@ def separation_circular(tau: mx.array, period, b, a) -> mx.array:
     Far-side masking: the raw formula is symmetric under phi -> phi + pi,
     so without a mask it would fabricate a mirror transit at the *far*
     conjunction (z = b at phase 0.5). Points with cos phi <= 0 (planet
-    behind the star) are pushed to z > 1 + r for any r < 1, where the
-    flux and its gradients are identically zero/flat — so the where is
-    smooth in effect (both branches give flux 1 near |phi| = pi/2 for
-    any sane a > 1 + r).
+    behind the star) are pushed to z + 2a >= 2a > 1 + r -- any orbit that
+    keeps the two bodies apart has a > 1 + r -- where the flux and its
+    gradients are identically zero/flat, for any r. (Before 0.11.0 the
+    push was 2 + z, which clears the star only for r <= 1: an occultor
+    larger than the star with b < r - 1 got a fake eclipse at the far
+    conjunction.)
 
     The sqrt argument is floored so the backward pass stays finite at the
     exact point z = 0 (b = 0 at mid-transit); the floor changes z by
@@ -72,4 +74,4 @@ def separation_circular(tau: mx.array, period, b, a) -> mx.array:
     sphi, cphi = sincos(phi)
     z2 = (a * sphi) ** 2 + (b * cphi) ** 2
     z = mx.sqrt(mx.maximum(z2, (10.0 * eps) ** 2))
-    return mx.where(cphi > 0.0, z, 2.0 + z)
+    return mx.where(cphi > 0.0, z, z + 2.0 * a)

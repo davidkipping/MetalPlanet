@@ -62,14 +62,18 @@ def contact_offsets(r, a_sky, b):
     order dtau^3 in the quadrature, against the O(dtau) error of not
     splitting at all.
 
-    Returns (phi_1, phi_2, phi_3, phi_4), ordered. A grazing transit
-    (b > 1 - r) collapses the inner pair onto the transit centre, which
+    Returns (phi_1, phi_2, phi_3, phi_4), ordered. The inner pair sits at
+    z = |1 - r|: the planet fully inside the disc for r < 1, the disc fully
+    covered for r > 1 (total occultation). A grazing transit
+    (b > |1 - r|) collapses the inner pair onto the transit centre, which
     the branchless five-interval split absorbs.
     """
     a2mb2 = mx.maximum(a_sky * a_sky - b * b, 1e-30)
     out = []
-    for sign in (1.0, -1.0):          # Z = 1 + r (outer), 1 - r (inner)
+    for sign in (1.0, -1.0):          # Z = 1 + r (outer), |1 - r| (inner)
         Z = 1.0 + sign * r
+        if sign < 0.0:
+            Z = mx.abs(Z) if isinstance(Z, mx.array) else abs(Z)
         s2 = (Z * Z - b * b) / a2mb2
         # A collapsed contact (s2 <= 0: the inner pair of a grazing
         # transit) sits where d sqrt and d arcsin are infinite, and the
@@ -194,7 +198,8 @@ def contact_offsets_anchored(r, a, b, k, h, ci, n_iter: int = 4,
     lin = contact_offsets(r, a_sky, b)
     lim = 0.5 * mx.abs(lin[3]) + 1e-12
     out = []
-    for phi0, Z, sgn in zip(lin, (1.0 + r, 1.0 - r, 1.0 - r, 1.0 + r),
+    inner = mx.abs(1.0 - r) if isinstance(r, mx.array) else abs(1.0 - r)
+    for phi0, Z, sgn in zip(lin, (1.0 + r, inner, inner, 1.0 + r),
                             (-1.0, -1.0, 1.0, 1.0)):
         exists = mx.logical_and(b < Z, e > 0.0)
         phi = phi0

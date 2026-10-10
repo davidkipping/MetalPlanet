@@ -307,7 +307,12 @@ def make_transit_target(t, y, yerr, t0_guess, period_guess,
             boxes (0.5 d and 0.05 d by default).
         eccentric: 10-parameter model with (sqrt(e) cos w, sqrt(e) sin w)
             instead of the 8-parameter circular one.
-        bounds: per-parameter (lo, hi) overrides on DEFAULT_BOUNDS.
+        bounds: per-parameter (lo, hi) overrides on DEFAULT_BOUNDS. The
+            defaults cap r at 0.5, b at 1.2 and a at 200; an occultor
+            larger than the star (a white-dwarf host) needs them widened,
+            e.g. ``{"r": (1.0, 12.0), "b": (0.0, 13.0), "a": (1.5, 1000.0)}``.
+            The model takes any r > 0 (fp32 error grows ~ r^2; README,
+            "rp > 1").
         strength: barrier weight for the eccentric constraints.
     """
     applemcmc, ChunkedGaussianLogLike = import_engine()
