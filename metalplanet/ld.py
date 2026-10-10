@@ -59,14 +59,31 @@ def u_to_q_np(u1, u2):
 # regions, after SquishierPlanet's laws.py
 # ---------------------------------------------------------------------------
 
-def hybrid2_vertices(eps=None):
+def _hybrid2_pole(eps=None, law=None) -> float:
+    """The pole a hybrid2-family prior is for: ``law`` (a name or HybridLaw
+    with hybrid2's shapes and one pole) ties the prior to the law it
+    serves; ``eps`` gives the pole directly; neither means hybrid2's."""
+    from .hybrid import HYBRID2, HYBRID2_EPS, get_law
+    if law is not None:
+        if eps is not None:
+            raise ValueError("pass law= or eps=, not both")
+        L = get_law(law)
+        if len(L.eps) != 1 or tuple(map(tuple, L.shapes)) != HYBRID2.shapes:
+            raise ValueError(f"{L.name} is not a hybrid2-type law (shapes "
+                             "{1 - mu^2, Pi_eps}); its prior is "
+                             "simplex_from_q")
+        return float(L.eps[0])
+    return HYBRID2_EPS if eps is None else float(eps)
+
+
+def hybrid2_vertices(eps=None, law=None):
     """(V_c, V_l) of hybrid2's exact physical triangle in (w1, w2); the
     third vertex is the origin (uniform disc). With g0, g1 the pole shape's
     slopes in xi = mu^2 at the limb and the centre, V_c has zero limb
     intensity and zero central slope, V_l zero limb intensity and zero
-    limb slope. Float64 numpy."""
-    from .hybrid import HYBRID2_EPS
-    e = HYBRID2_EPS if eps is None else float(eps)
+    limb slope. Float64 numpy. The pole is hybrid2's unless ``law=`` (the
+    law the prior serves) or ``eps=`` says otherwise."""
+    e = _hybrid2_pole(eps, law)
     N = e ** -2 - (1.0 + e) ** -2
     g0 = 2.0 / (N * e ** 3)
     g1 = 2.0 / (N * (1.0 + e) ** 3)
@@ -75,29 +92,30 @@ def hybrid2_vertices(eps=None):
     return Vc, Vl
 
 
-def hybrid2_from_q(q1: mx.array, q2: mx.array):
+def hybrid2_from_q(q1: mx.array, q2: mx.array, eps=None, law=None):
     """(q1, q2) in [0,1]^2 -> (w1, w2) uniform on hybrid2's exact triangle,
     MLX ops (differentiable): w = sqrt(q1) [(1 - q2) V_c + q2 V_l]. q1 is
-    clamped away from 0 as ``q_to_u`` does."""
-    Vc, Vl = hybrid2_vertices()
+    clamped away from 0 as ``q_to_u`` does. For a custom hybrid2-type law,
+    pass it as ``law=`` so the triangle is the one for its pole."""
+    Vc, Vl = hybrid2_vertices(eps, law)
     s = mx.sqrt(mx.maximum(q1, 1e-12))
     w1 = s * ((1.0 - q2) * float(Vc[0]) + q2 * float(Vl[0]))
     w2 = s * ((1.0 - q2) * float(Vc[1]) + q2 * float(Vl[1]))
     return w1, w2
 
 
-def hybrid2_from_q_np(q1, q2):
+def hybrid2_from_q_np(q1, q2, eps=None, law=None):
     """Float64 host-side replica of hybrid2_from_q."""
-    Vc, Vl = hybrid2_vertices()
+    Vc, Vl = hybrid2_vertices(eps, law)
     s = np.sqrt(np.maximum(np.asarray(q1, dtype=np.float64), 1e-12))
     q2 = np.asarray(q2, dtype=np.float64)
     return (s * ((1.0 - q2) * Vc[0] + q2 * Vl[0]),
             s * ((1.0 - q2) * Vc[1] + q2 * Vl[1]))
 
 
-def hybrid2_to_q_np(w1, w2):
+def hybrid2_to_q_np(w1, w2, eps=None, law=None):
     """Inverse of hybrid2_from_q_np: solve w = s V_c + (s q2)(V_l - V_c)."""
-    Vc, Vl = hybrid2_vertices()
+    Vc, Vl = hybrid2_vertices(eps, law)
     M = np.stack([Vc, Vl - Vc], axis=1)
     w = np.stack([np.asarray(w1, dtype=np.float64),
                   np.asarray(w2, dtype=np.float64)], axis=-1)

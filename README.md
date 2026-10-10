@@ -291,7 +291,7 @@ flux = TransitModel(p, t).light_curve(p)
 
 | law | weights | terms | poles eps |
 |---|---|---|---|
-| hybrid2 | 2 | 1 - mu^2, Pi_eps | 0.208 |
+| hybrid2 | 2 | 1 - mu^2, Pi_eps | 0.36 |
 | hybrid4 | 4 | 1 - mu^4, (1 - mu^2)^2, Pi_eps x 2 | 0.0118, 0.304 |
 | hybrid5 | 5 | 1 - mu^4, (1 - mu^2)^2, Pi_eps x 3 | 0.0016, 0.0413, 0.387 |
 
@@ -300,6 +300,13 @@ and the hybrid4/5 poles on the analytic ladder `exp[2 pi (sqrt(k + 1/2)
 - sqrt K)]`. Uniform priors on the physical regions: `hybrid2_from_q`
 (the exact triangle) and `simplex_from_q` (stick-breaking on
 `w >= 0, sum w <= 1`), MLX and numpy versions, with inverses.
+
+hybrid2's pole, eps = 0.36, is SquishierPlanet / LDhybrid v1.0's tuning
+over 198 PHOENIX v3.0 and MPS-ATLAS models x 37 passbands, where hybrid2
+beats quadratic in 73% of model-bands. A custom law is a `HybridLaw`
+object, accepted wherever a law name is (kernels are cached per law
+definition); give a custom hybrid2-type law's prior its pole with
+`hybrid2_from_q(q1, q2, law=my_law)`.
 
 For a spherical planet every column is elementary -- **no elliptic
 integrals**, unlike the quadratic law's mu term: the even powers come from

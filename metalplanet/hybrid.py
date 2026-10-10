@@ -14,7 +14,7 @@ term carries:
 
     I(mu) / I(1) = 1 - sum_j w_j T_j(mu),          I(0) / I(1) = 1 - sum_j w_j
 
-    hybrid2 :  T = {1 - mu^2,  Pi_0.208}                           2 weights
+    hybrid2 :  T = {1 - mu^2,  Pi_0.36}                            2 weights
     hybrid4 :  T = {1 - mu^4,  (1 - mu^2)^2,  Pi_eps0, Pi_eps1}    4 weights
     hybrid5 :  T = {1 - mu^4,  (1 - mu^2)^2,  Pi_eps0..2}          5 weights
 
@@ -22,7 +22,8 @@ term carries:
 
 with the poles of hybrid4 and hybrid5 on the analytic ladder
 eps_k = exp[2 pi (sqrt(k + 1/2) - sqrt K)] (K = 2, 3) and hybrid2's single
-pole tuned on J-band stars. On simulated M-G dwarfs hybrid4 is 15-20x more
+pole at eps = 0.36 (tuned over PHOENIX and MPS-ATLAS models in 37
+passbands). On simulated M-G dwarfs hybrid4 is 15-20x more
 accurate than the quadratic law and hybrid5 ties the Claret four-parameter
 law. The physical region is an exact triangle for hybrid2 and, for the
 others, the simplex w_j >= 0, sum w_j <= 1 (``ld.hybrid2_from_q``,
@@ -102,8 +103,11 @@ __all__ = ["HybridLaw", "HYBRID2", "HYBRID4", "HYBRID5", "LAWS",
 _PI = math.pi
 _TWO_PI = 2.0 * math.pi
 
-#: hybrid2's single pole, tuned on the J-band training stars
-HYBRID2_EPS = 0.208
+#: hybrid2's single pole, as SquishierPlanet / LDhybrid v1.0 tune it over 198
+#: PHOENIX v3.0 and MPS-ATLAS models x 37 passbands: the 90th/99th-percentile
+#: light-curve errors are minimised at 0.35-0.36, where hybrid2 beats
+#: quadratic in 73% of model-bands
+HYBRID2_EPS = 0.36
 
 #: half-width in y = V/U of the series bridge across the Q = 0 line, by
 #: precision. Outside it the closed forms are used, and their partials
@@ -182,6 +186,9 @@ class HybridLaw:
 HYBRID2 = HybridLaw("hybrid2", (HYBRID2_EPS,), ((1.0, -1.0, 0.0),))
 HYBRID4 = HybridLaw("hybrid4", ladder(2), ((1.0, 0.0, -1.0), (1.0, -2.0, 1.0)))
 HYBRID5 = HybridLaw("hybrid5", ladder(3), ((1.0, 0.0, -1.0), (1.0, -2.0, 1.0)))
+#: THE registry of hybrid laws: every entry point accepts these names. A
+#: HybridLaw object works too; the kernels are cached per law *definition*
+#: (metal_hybrid._law_key), never per name alone
 LAWS = {law.name: law for law in (HYBRID2, HYBRID4, HYBRID5)}
 
 

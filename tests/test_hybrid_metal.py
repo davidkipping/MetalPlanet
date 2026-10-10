@@ -22,6 +22,7 @@ import mlx.core as mx
 import pytest
 
 import metalplanet
+from hybrid_weights import phys_w
 from metalplanet import metal as M
 from metalplanet import ld
 from metalplanet.hybrid import LAWS, hybrid_norms
@@ -43,10 +44,7 @@ ORBITS = [("circ", None), ("ecc", (0.35, -0.25))]
 
 
 def weights(law, seed=0):
-    rng = np.random.default_rng(seed)
-    if law == "hybrid2":
-        return np.array(ld.hybrid2_from_q_np(rng.random(), rng.random()))
-    return ld.simplex_from_q_np(rng.random(LAWS[law].n_w))
+    return phys_w(law, np.random.default_rng(seed))
 
 
 def _ctx(dtype):
@@ -611,3 +609,45 @@ def test_non_mlx_data_keeps_its_precision(entry, kind):
     mx.eval(got, ref)
     assert got.dtype == dt
     assert np.array_equal(np.asarray(got), np.asarray(ref))
+
+
+
+# ---------------------------------------------------------------------------
+# kernels are cached per law definition, not per name (0.12.0)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+def test_a_same_named_law_with_another_pole_gets_its_own_kernel():
+    """Keyed by name, a user-built HybridLaw called "hybrid2" with another
+    pole silently ran the registered hybrid2's compiled constants."""
+    from metalplanet.hybrid import HYBRID2, HybridLaw, flux_dev_hybrid
+    from metalplanet.metal_hybrid import flux_dev_metal_hybrid
+    other = HybridLaw("hybrid2", (0.15,), HYBRID2.shapes)
+    w = [0.3, 0.2]
+    z = mx.array(np.linspace(0.0, 1.15, 400, dtype=np.float32))
+    reg = np.asarray(flux_dev_metal_hybrid(z, 0.1, "hybrid2", w))
+    got = np.asarray(flux_dev_metal_hybrid(z, 0.1, other, w))
+    ref = np.asarray(flux_dev_hybrid(z, 0.1, w, other))
+    assert np.abs(got - ref).max() < 1e-6
+    assert np.abs(got - reg).max() > 1e-4
+    tau = mx.array(np.linspace(-0.12, 0.12, 400, dtype=np.float32))
+    a = np.asarray(flux_dev_from_tau(tau, 3.45, 8.8, 0.3, 0.1,
+                                     limb_dark="hybrid2", u=w))
+    b = np.asarray(flux_dev_from_tau(tau, 3.45, 8.8, 0.3, 0.1,
+                                     limb_dark=other, u=w))
+    with mx.stream(mx.cpu):
+        c = np.asarray(flux_dev_from_tau(
+            mx.array(np.asarray(tau), dtype=mx.float64), 3.45, 8.8, 0.3, 0.1,
+            limb_dark=other, u=w))
+    assert np.abs(b - c).max() < 2e-6 and np.abs(a - b).max() > 1e-4
+
+
+@pytest.mark.skipif(not metal_available(), reason="Metal unavailable")
+def test_a_law_name_need_not_be_a_metal_identifier():
+    from metalplanet.hybrid import HYBRID2, HybridLaw, flux_dev_hybrid
+    from metalplanet.metal_hybrid import flux_dev_metal_hybrid
+    law = HybridLaw("my hybrid2 @ eps=0.15", (0.15,), HYBRID2.shapes)
+    z = mx.array(np.linspace(0.0, 1.15, 64, dtype=np.float32))
+    got = np.asarray(flux_dev_metal_hybrid(z, 0.1, law, [0.3, 0.2]))
+    ref = np.asarray(flux_dev_hybrid(z, 0.1, [0.3, 0.2], law))
+    assert np.abs(got - ref).max() < 1e-6

@@ -62,7 +62,7 @@ from .trig import sincos
 __all__ = ["TransitParams", "TransitModel"]
 
 _SUPPORTED_LD = ("uniform", "linear", "quadratic", "polynomial",
-                 "hybrid2", "hybrid4", "hybrid5")
+                 *_HYBRID_LAWS)          # the hybrid law registry
 #: laws whose coefficients enter the graph as one vector (uvec) rather
 #: than as (u1, u2): the polynomial law at any order, and the hybrid laws
 #: at their fixed count of shape weights

@@ -5,6 +5,43 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-10-10
+
+### Changed
+- **hybrid2's pole is eps = 0.36** (`HYBRID2_EPS`), SquishierPlanet /
+  LDhybrid v1.0's tuning over 198 PHOENIX v3.0 and MPS-ATLAS models x 37
+  passbands: the 90th/99th-percentile light-curve errors are minimised at
+  0.35-0.36, where hybrid2 beats quadratic in 73% of model-bands. hybrid2
+  light curves and its prior triangle (vertices (-0.1246, 1.1246) and
+  (1.2010, -0.2010)) follow; hybrid4/5 are unchanged.
+
+### Fixed
+- **Compiled hybrid kernels were cached by law name alone**, so a
+  user-built `HybridLaw` sharing a registered name but not its poles or
+  shapes silently ran the registered law's kernel (pre-existing since
+  0.10.0). The four kernel caches now key on the whole definition, and a
+  non-registered law's kernels get a sanitised name plus a digest -- any
+  law name works, where one that was not a valid Metal identifier aborted
+  the process. Registered laws keep their kernel names and sources.
+
+### Added
+- `hybrid2_vertices`, `hybrid2_from_q`, `hybrid2_from_q_np`,
+  `hybrid2_to_q_np` take `law=` (a name or a hybrid2-type `HybridLaw`), so
+  a prior is tied to the law it serves, or `eps=`, as SquishierPlanet's
+  do; `law=` refuses a non-hybrid2-type law and a conflicting `eps=`.
+- `HYBRID2_EPS` is exported; the supported limb-darkening names derive
+  from the hybrid law registry (`hybrid.LAWS`).
+
+### Tests
+- One weight sampler for every hybrid test file (`tests/hybrid_weights.py`),
+  choosing the physical region by the law's structure, not its name; the
+  four drifting copies are gone. New: a same-named law with another pole
+  gets its own kernel (z and tau paths) and a non-identifier law name
+  compiles -- both fail on the old keying; the prior's `law=` path at a
+  non-default pole (constraints, monotone profile, round trip, MLX =
+  numpy) and its argument checks. The SquishierPlanet cross-checks skip
+  hybrid2, with the reason, on a checkout whose pole differs.
+
 ## [0.11.0] — 2026-10-10
 
 ### Added

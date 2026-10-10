@@ -23,7 +23,8 @@ from .kepler import (kepler, kepler_E, kepler_E_sincos,
                      separation_keplerian)
 from .anchored import anchor_constants, separation_anchored
 from .poly import flux_dev_poly, sn_dev_poly
-from .hybrid import (HYBRID2, HYBRID4, HYBRID5, HybridLaw, LAWS as HYBRID_LAWS,
+from .hybrid import (HYBRID2, HYBRID2_EPS, HYBRID4,
+                     HYBRID5, HybridLaw, LAWS as HYBRID_LAWS,
                      flux_dev_hybrid, hybrid_norms, shape_cols)
 from .ld import (hybrid2_from_q, hybrid2_from_q_np, hybrid2_to_q_np,
                  q_from_simplex_np, q_to_u, q_to_u_np, simplex_from_q,
@@ -59,6 +60,7 @@ __all__ = [
     "u_to_q_np",
     "HybridLaw",
     "HYBRID2",
+    "HYBRID2_EPS",
     "HYBRID4",
     "HYBRID5",
     "HYBRID_LAWS",
@@ -75,4 +77,4 @@ __all__ = [
     "sn_dev_with_aux",
 ]
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"

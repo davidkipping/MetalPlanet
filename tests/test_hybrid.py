@@ -22,7 +22,7 @@ import pytest
 import metalplanet
 from metalplanet import hybrid as H
 from metalplanet import ld
-from metalplanet.hybrid import (HYBRID2, HYBRID4, HYBRID5, LAWS, flux_dev_hybrid,
+from metalplanet.hybrid import (HYBRID2, HYBRID4, HYBRID5, LAWS, HybridLaw, flux_dev_hybrid,
                                 hybrid_norms, ladder, lens_geometry, pole_col,
                                 shape_cols, shape_partials, w_to_c)
 from metalplanet.poly import sn_dev_poly
@@ -39,6 +39,8 @@ try:
     from squishierplanet.laws import Law as SPLaw
 except Exception:                                     # optional cross-check
     sp = None
+
+from hybrid_weights import phys_w as _phys_w, vertex_weight  # noqa: E402
 
 NAMES = ["hybrid2", "hybrid4", "hybrid5"]
 RS = [0.01, 0.1, 0.3, 0.8]
@@ -58,11 +60,17 @@ def intensity_np(law, w, mu):
 
 
 def phys_w(law, seed):
-    """A weight vector inside the physical region (triangle / simplex)."""
-    rng = np.random.default_rng(seed)
-    if law.name == "hybrid2":
-        return np.asarray(ld.hybrid2_from_q_np(rng.random(), rng.random()))
-    return ld.simplex_from_q_np(rng.random(law.n_w))
+    """A weight vector inside the physical region (triangle / simplex),
+    chosen by the law's structure (hybrid_weights)."""
+    return _phys_w(law, np.random.default_rng(seed))
+
+
+def sp_same_hybrid2():
+    """Does the SquishierPlanet checkout carry MetalPlanet's hybrid2 pole?
+    (Its hybrid2 is then the same law; a checkout with another pole cannot
+    be compared on hybrid2.)"""
+    from squishierplanet import laws as spl
+    return float(spl.HYBRID2_EPS) == H.HYBRID2_EPS
 
 
 def z_grid(r, law=None):
@@ -127,7 +135,7 @@ class TestDefinitions:
     def test_ladders(self):
         assert np.allclose(ladder(2), [0.01176, 0.3041], rtol=1e-3)
         assert np.allclose(ladder(3), [0.001597, 0.04128, 0.3874], rtol=1e-3)
-        assert HYBRID2.eps == (0.208,)
+        assert HYBRID2.eps == (0.36,)
         assert (HYBRID2.n_w, HYBRID4.n_w, HYBRID5.n_w) == (2, 4, 5)
 
     @pytest.mark.skipif(sp is None, reason="squishierplanet not importable")
@@ -136,6 +144,8 @@ class TestDefinitions:
         assert np.allclose(ladder(2), spl.ladder(2), rtol=1e-15)
         assert np.allclose(ladder(3), spl.ladder(3), rtol=1e-15)
         for name in NAMES:
+            if name == "hybrid2" and not sp_same_hybrid2():
+                continue
             law = LAWS[name]
             w = phys_w(law, 1)
             ref = spl.hybrid(name, w)
@@ -295,6 +305,9 @@ class TestFlux:
     @pytest.mark.parametrize("r", RS)
     def test_vs_squishierplanet(self, name, r):
         from squishierplanet import laws as spl
+        if name == "hybrid2" and not sp_same_hybrid2():
+            pytest.skip("this SquishierPlanet checkout's hybrid2 pole is not "
+                        "MetalPlanet's")
         law = LAWS[name]
         zs = z_grid(r, law)
         for seed in (6, 7, 8):
@@ -345,7 +358,7 @@ class TestFlux:
             for j in range(law.n_w + 1):
                 w = np.zeros(law.n_w)
                 if j:
-                    w[j - 1] = 1.0 if law.name == "hybrid2" else 0.9
+                    w[j - 1] = vertex_weight(law)
                 with mx.stream(mx.cpu):
                     a = np.asarray(flux_dev_hybrid(f64(zs), f64(r), w, law))
                     b = np.asarray(flux_dev_hybrid(
@@ -508,31 +521,52 @@ class TestGradients:
 # ---------------------------------------------------------------------------
 
 class TestPriors:
-    def test_hybrid2_triangle(self):
-        """Uniform samples of the exact triangle satisfy its (A)(B)(C); the
-        vertices are the notes' values; the map inverts."""
+    def test_hybrid2_vertices(self):
         Vc, Vl = ld.hybrid2_vertices()
-        assert np.allclose(Vc, [-0.053, 1.053], atol=2e-3)
-        assert np.allclose(Vl, [1.112, -0.112], atol=2e-3)
-        e = H.HYBRID2_EPS
+        assert np.allclose(Vc, [-0.1246, 1.1246], atol=2e-4)
+        assert np.allclose(Vl, [1.2010, -0.2010], atol=2e-4)
+        assert all(np.array_equal(a, b) for a, b in zip(
+            ld.hybrid2_vertices(law="hybrid2"), (Vc, Vl)))
+
+    @pytest.mark.parametrize("which", ["hybrid2", "custom-pole"])
+    def test_hybrid2_triangle(self, which):
+        """Uniform samples of the exact triangle satisfy its (A)(B)(C) and
+        give a non-negative, centre-brightening profile; the map inverts;
+        MLX agrees with numpy -- for hybrid2, and for a custom hybrid2-type
+        law whose pole reaches the prior only through ``law=``."""
+        law = (HYBRID2 if which == "hybrid2" else
+               HybridLaw("custom2", (0.15,), HYBRID2.shapes))
+        kw = {} if which == "hybrid2" else {"law": law}
+        e = law.eps[0]
         N = e ** -2 - (1 + e) ** -2
         g0, g1 = 2 / (N * e ** 3), 2 / (N * (1 + e) ** 3)
         rng = np.random.default_rng(0)
         q1, q2 = rng.random(5000), rng.random(5000)
-        w1, w2 = ld.hybrid2_from_q_np(q1, q2)
+        w1, w2 = ld.hybrid2_from_q_np(q1, q2, **kw)
         assert (w1 + w2 <= 1 + 1e-12).all()
         assert (w1 + g0 * w2 >= -1e-12).all()
         assert (w1 + g1 * w2 >= -1e-12).all()
         mu = np.linspace(0, 1, 201)
         for k in range(0, 5000, 250):
-            I = intensity_np(HYBRID2, [w1[k], w2[k]], mu)
+            I = intensity_np(law, [w1[k], w2[k]], mu)
             assert (I >= -1e-12).all() and (np.diff(I) >= -1e-12).all()
-        b1, b2 = ld.hybrid2_to_q_np(w1, w2)
+        b1, b2 = ld.hybrid2_to_q_np(w1, w2, **kw)
         assert np.allclose(b1, q1, atol=1e-12) and np.allclose(b2, q2, atol=1e-12)
         with mx.stream(mx.cpu):
-            m1, m2 = ld.hybrid2_from_q(f64(q1[:50]), f64(q2[:50]))
+            m1, m2 = ld.hybrid2_from_q(f64(q1[:50]), f64(q2[:50]), **kw)
         assert np.allclose(np.asarray(m1), w1[:50], atol=1e-15)
         assert np.allclose(np.asarray(m2), w2[:50], atol=1e-15)
+
+    def test_prior_pole_arguments(self):
+        """law= ties the triangle to a law; it refuses a non-hybrid2-type
+        law and a conflicting eps=."""
+        custom = HybridLaw("custom2", (0.15,), HYBRID2.shapes)
+        assert all(np.array_equal(a, b) for a, b in zip(
+            ld.hybrid2_vertices(law=custom), ld.hybrid2_vertices(eps=0.15)))
+        with pytest.raises(ValueError, match="not a hybrid2-type law"):
+            ld.hybrid2_vertices(law="hybrid4")
+        with pytest.raises(ValueError, match="not both"):
+            ld.hybrid2_from_q_np(0.5, 0.5, eps=0.2, law=custom)
 
     @pytest.mark.skipif(sp is None, reason="squishierplanet not importable")
     def test_priors_match_squishierplanet(self):
@@ -540,7 +574,7 @@ class TestPriors:
         rng = np.random.default_rng(1)
         q1, q2 = rng.random(100), rng.random(100)
         ref = spl.hybrid2_from_q(q1, q2)
-        w1, w2 = ld.hybrid2_from_q_np(q1, q2)
+        w1, w2 = ld.hybrid2_from_q_np(q1, q2, eps=spl.HYBRID2_EPS)
         assert np.allclose(np.stack([w1, w2], -1), ref, atol=1e-15)
         q = rng.random((100, 5))
         assert np.allclose(ld.simplex_from_q_np(q), spl.simplex_from_q(q),

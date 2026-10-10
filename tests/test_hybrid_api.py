@@ -15,6 +15,7 @@ import mlx.core as mx
 import pytest
 
 import metalplanet
+from hybrid_weights import phys_w
 from metalplanet import ld
 from metalplanet.hybrid import LAWS, flux_dev_hybrid
 from metalplanet.metal import metal_available
@@ -146,9 +147,7 @@ def test_fp32_gpu_model_runs_the_fused_kernel(law, mode, ecc):
 def test_fp32_light_curves_match_the_loop(law, mode):
     n = 4
     rng = np.random.default_rng(5)
-    W = (ld.simplex_from_q_np(rng.random((n, LAWS[law].n_w)))
-         if law != "hybrid2"
-         else np.stack(ld.hybrid2_from_q_np(rng.random(n), rng.random(n)), -1))
+    W = phys_w(law, rng, n)
     rp = np.linspace(0.08, 0.12, n)
     m = metalplanet.TransitModel(params(law), T, dtype=mx.float32,
                                  **MODES[mode])
@@ -341,9 +340,7 @@ def test_contact_integration(law):
 def test_light_curves_per_set_weights(law, form):
     n = 4
     rng = np.random.default_rng(1)
-    W = (ld.simplex_from_q_np(rng.random((n, LAWS[law].n_w)))
-         if law != "hybrid2"
-         else np.stack(ld.hybrid2_from_q_np(rng.random(n), rng.random(n)), -1))
+    W = phys_w(law, rng, n)
     rp = np.linspace(0.08, 0.12, n)
     m = metalplanet.TransitModel(params(law), T)
     if form == "sequence":
