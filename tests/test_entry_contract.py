@@ -30,6 +30,7 @@ import pytest
 import metalplanet as mp
 from metalplanet import metal as M
 from metalplanet import metal_hybrid as MH
+from metalplanet import metal_oblate as MO
 from metalplanet.metal import metal_available
 from metalplanet.metal_hybrid import flux_dev_metal_hybrid
 
@@ -85,6 +86,17 @@ KERNEL_ENTRIES.update({
                              GEO_WD + QUAD, {"exp_time": 0.0014}, "tq"),
     "tau/hybrid_ecc r>1": (mp.flux_dev_from_tau, "tau", TAU_WD, GEO_WD,
                            dict(HYB, secosw=0.3, sesinw=0.2), "th"),
+})
+# Oblate planets (f=, theta=): their own kernel family (metal_oblate).
+OBL = dict(HYB, f=0.2, theta=0.5)
+KERNEL_ENTRIES.update({
+    "tau/oblate": (mp.flux_dev_from_tau, "tau", TAU, GEO, OBL, "to"),
+    "tau/oblate_contact_ecc": (mp.flux_dev_from_tau, "tau", TAU, GEO,
+                               dict(OBL, exp_time=0.02, secosw=0.3,
+                                    sesinw=0.2), "to"),
+    "tau/oblate_basis": (mp.flux_dev_from_tau, "tau", TAU, GEO,
+                         {"limb_dark": "hybrid4", "ld_basis": True,
+                          "f": 0.2, "theta": 0.5}, "to"),
 })
 GRAPH_ENTRIES = {
     "flux_dev": (mp.flux_dev, "z", Z, [("r", 0.1)] + QUAD, {}, None),
@@ -161,7 +173,8 @@ def kernel_spy():
                (M, "_ld_basis_metal_core", "zb"),
                (M, "_make_tau_core_g", "tq"),
                (MH, "_make_core", "th"),
-               (MH, "_z_core", "zh")]
+               (MH, "_z_core", "zh"),
+               (MO, "_make_core", "to")]
     saved = []
     for mod, name, tag in targets:
         orig = getattr(mod, name)

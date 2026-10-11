@@ -295,6 +295,38 @@ class TestColumns:
 # the laws against the oracle
 # ---------------------------------------------------------------------------
 
+    @pytest.mark.parametrize("r", [0.5, 0.8, 0.95])
+    def test_pole_column_just_past_the_inner_contact(self, r):
+        """Just outside z = 1 - r the vanishing factor is -Bp = 1 - (z + r)^2,
+        whose product form carries the rounding of 1 - z - r; 0.12.x mixed
+        it with the exact kite and kap1 / (p eps) amplified the mismatch:
+        1.6e-7 absolute (8e-11 of the column norm) at r = 0.8, eps = 0.0016,
+        1e-13 from the contact, 1.5e-4 of the norm in the fp32 kernel.
+        Every pole, 1e-13 .. 1e-6 from the contact, against the oracle."""
+        from metalplanet.metal import metal_available
+        from metalplanet.metal_hybrid import flux_dev_metal_hybrid
+        eps_all = sorted(set(ladder(3) + ladder(2) + (H.HYBRID2_EPS,)))
+        zs = [1.0 - r + d for d in (1e-13, 1e-11, 1e-9, 1e-6)]
+        for e in eps_all:
+            def I(x, e=e):
+                return 1 / (1 - x * x + mp.mpf(e)) ** 2
+            norm = math.pi / (e * (1 + e))
+            with mx.stream(mx.cpu):
+                got = np.asarray(H.pole_col(f64(zs), f64(r), e))
+            for z, g in zip(zs, got):
+                assert abs(g - oracle_column(I, z, r)) / norm < 1e-14, (e, z)
+        if metal_available():
+            z32 = (1.0 - r) + np.logspace(-7.5, -2, 40)
+            z32 = z32.astype(np.float32)
+            with mx.stream(mx.gpu):
+                k = np.asarray(flux_dev_metal_hybrid(mx.array(z32), r, "hybrid5",
+                                                     None, basis=True), np.float64)
+            with mx.stream(mx.cpu):
+                ref = np.asarray(H.shape_cols(f64(z32.astype(np.float64)),
+                                              float(np.float32(r)), "hybrid5"))
+            assert (np.abs(k - ref) / hybrid_norms("hybrid5")).max() < 2e-6
+
+
 class TestFlux:
     @pytest.mark.parametrize("name", NAMES)
     @pytest.mark.parametrize("r", [0.1, 0.3])
@@ -425,12 +457,17 @@ class TestGradients:
 
             fz = ct * (val(zs + h, r, w) - val(zs - h, r, w)) / (2 * h)
             fr = float(np.sum(ct * (val(zs, r + h, w) - val(zs, r - h, w)) / (2 * h)))
+            # F is a ratio of linear functions of w: a wider step costs only
+            # O(h^2) (1e-9 at 1e-4), while 1e-6 leaves rounding noise of
+            # 3e-7 on hybrid5's innermost-pole weight, whose gradient is
+            # ~1e-5 (autodiff equals the closed form to 3e-15 there)
+            hw = 1e-4
             fw = []
             for j in range(law.n_w):
                 wp, wm = w.copy(), w.copy()
-                wp[j] += h
-                wm[j] -= h
-                fw.append(float(np.sum(ct * (val(zs, r, wp) - val(zs, r, wm)) / (2 * h))))
+                wp[j] += hw
+                wm[j] -= hw
+                fw.append(float(np.sum(ct * (val(zs, r, wp) - val(zs, r, wm)) / (2 * hw))))
         ok = _switch_free(zs, r, law, h)
         assert np.abs(gz - fz)[ok].max() / np.abs(fz).max() < 1e-7
         assert abs(gr - fr) / abs(fr) < 1e-6

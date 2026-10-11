@@ -5,3 +5,7 @@ __pycache__/
 .DS_Store
 build/
 dist/
+
+# oblate cross-code benchmark: competitor clones and their venv (local only)
+benchmarks/oblate_compare/vendor/
+benchmarks/oblate_compare/.venv/

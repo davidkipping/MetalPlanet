@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "metalplanet"
-version = "0.12.2"
+version = "0.13.0"
 description = "MetalPlanet: analytic, differentiable transit light curves on Apple Silicon (MLX), with a batman-style frontend"
 readme = "README.md"
 license = {text = "MIT"}

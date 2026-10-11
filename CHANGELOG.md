@@ -5,6 +5,105 @@ All notable changes to MetalPlanet. Versioning: semantic-ish
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-10-10
+
+Oblate planets: an elliptical planet (area-equivalent radius, projected
+flattening f, sky angle theta) for the hybrid laws, on every surface --
+the exact MLX graph, `flux_dev_from_tau(f=, theta=)` with fp32 Metal
+kernels and analytic gradients, and `TransitParams.f` / `.theta`. Spherical
+planets are untouched (f = None). Plan and measurements:
+`docs/oblate-plan.md`; cross-code comparison: `benchmarks/oblate_compare/`.
+
+### Added
+- **Oblate planets, Stage 1: the reference graph** (`metalplanet/oblate.py`,
+  plan in `docs/oblate-plan.md`). `flux_dev_oblate(x0, y0, r, f, w, law)`
+  and `shape_cols_oblate(x0, y0, r, f, law)` give the hybrid laws' transit
+  of an ellipse with area-equivalent radius r and flattening f, the centre
+  in the planet's principal frame (`oblate.principal_frame(X, Y, theta)`).
+  An MLX graph in fp64 and fp32, differentiable in every input, under the
+  usual data contract. Agrees with SquishierPlanet's analytic reference to
+  3e-15 (fp64) and 4e-7 (fp32) of each column's unocculted flux over its
+  topology classes and limb- and pole-tangency stress sets. Below
+  f = 1e-10 (fp64) / 1e-5 (fp32) it returns the spherical columns. The
+  domain is r <= (1 - f)^1.5. This is the reference the Stage 3 Metal
+  kernels will be validated against; it is slow (~20 us per point) and
+  the transit-time entry points do not take f yet.
+- **Oblate planets, Stage 2: on an orbit.** `flux_dev_from_tau(...,
+  limb_dark=<hybrid law>, u=w, f=f, theta=theta)`, with f and theta
+  scalars or per chain, circular or eccentric orbits, every exposure rule,
+  and the `ld_basis=True` form. The sky frame and theta are
+  SquishierPlanet's (light curves agree with its `model.light_curve` to
+  5e-16). The contact rule splits at the oblate planet's own contacts,
+  solved per side (a tilted planet's ingress and egress differ, and a
+  grazing one can have both outer contacts on one side of conjunction):
+  exact to 2e-15 rad in fp64, and on 30-minute exposures 4-40x more
+  accurate than splitting at the spherical contacts. With f = 0 the result
+  equals the spherical path's to 2e-17. Without f and theta, nothing on
+  the spherical paths changes (bitwise). Out-of-domain array arguments
+  give NaN rather than raising, so the call stays compilable.
+- **Oblate planets, Stage 3: fp32 Metal kernels** (`metalplanet/
+  metal_oblate.py`). fp32 data on the GPU now takes fused kernels for every
+  exposure rule, circular and eccentric orbits, the scalar and `ld_basis`
+  forms, forward and VJP. Within 2e-7 of the fp64 graph in flux; gradients
+  in every input (tau, period, a, b, r, f, theta, the weights,
+  secosw/sesinw) within 1e-3 of fp64 autodiff, typically 1e-5. The VJP is
+  the derivative of exactly the forward's function: one templated
+  evaluation, instantiated on float and on a dual number carrying
+  d/d(centre, axes). The quartic roots come from the same hand-written
+  QR eigensolver as the graph (once per point, the other levels
+  warm-started from it); contacts are solved one thread per chain. Below
+  f = 1e-5 a chain takes the spherical forms, with d/df = 0 there.
+  Cost on the GPU: 9-25x the spherical hybrid kernels with one evaluation
+  per point, ~60-75x under the contact rule (the spherical hybrid kernel
+  is ~0.2 ns per node there; the oblate one ~14).
+
+- **Oblate planets, Stage 4: `TransitParams.f` and `.theta`.** Optional,
+  None by default (spherical, bitwise unchanged); `theta` in degrees like
+  `inc` and `w`. An oblate model needs a hybrid law and a primary transit.
+  `light_curve`, `light_curves` (per-set f and theta) and
+  `light_curve_mx` (differentiable in f and theta) all route through
+  `flux_dev_from_tau(f=, theta=)` -- the oblate kernels on an fp32 GPU
+  model -- with the model's own exposure rule. Light curves agree with
+  SquishierPlanet's `model.light_curve` to 8e-16 in absolute times;
+  f = 0 equals the spherical model to 2e-15. Switching a model between
+  spherical and oblate raises, as a changed law does.
+- `benchmarks/bench_oblate.py`: oblate vs spherical, per law, forward and
+  value+grad, subprocess-isolated.
+- `benchmarks/oblate_compare/`: a cross-code benchmark against
+  squishyplanet, JoJo and GreenLantern -- precision against a 30-digit
+  integral, single-curve wall time to 10^7 points, a 512-set batch and
+  value + gradient -- with the macOS OpenCL 1.2 build notes for
+  GreenLantern. At 10^7 points the fp32 kernel is 43x faster than
+  GreenLantern, 128x than JoJo and 795x than squishyplanet; the fp64 codes
+  all reach rounding.
+
+### Fixed
+- **Hybrid pole columns just past the inner contact, large planets.** The
+  partial-regime pole form mixed the exact lens term (kite) with
+  1 - (z + r)^2 in its product form, which near the inner contact carries
+  the rounding of 1 - z - r; kap1 / (p eps) amplified the mismatch. At
+  r = 0.8, eps = 0.0016, 1e-13 past the contact the fp64 column was off by
+  1.6e-7 (8e-11 of its norm; growing ~1/sqrt(distance)), the fp32 kernel
+  by 1.5e-4 of its norm, and the fp32 graph's d/dz by 2.5e-3 at r = 0.95.
+  The smaller of 1 - (z - r)^2 and (z + r)^2 - 1 is now always derived
+  from kite^2 = their product. Now 1.4e-15 (fp64) and 8e-7 (fp32) of the
+  norm there; r <= 0.5 was already at rounding. Found answering
+  SquishierPlanet, whose pole moments were right. Hybrid outputs move at
+  rounding elsewhere; the quadratic paths are bitwise unchanged.
+
+### Changed
+- The oblate graph's quartic roots are seeded by MetalPlanet's own 4x4
+  complex eigensolver (balanced, Wilkinson-shifted Hessenberg QR, written
+  in elementwise operations) instead of `mx.linalg.eigvals`, which runs
+  only on the CPU in complex64 and has no Metal counterpart. Same accuracy
+  on every stress set; the fp32 graph no longer leaves the GPU; and it is
+  the algorithm the oblate kernels carry.
+- The oblate graph's arc choice no longer rests on a point next to a limb
+  crossing (a graze's sliver made that test a coin toss in fp32), and the
+  fully-inside regime sums each pole's two inner residues as one quadratic
+  factor, which keeps fp32 derivatives when those roots are tiny (a nearly
+  centred, nearly round planet). Values unchanged at fp64 rounding.
+
 ## [0.12.2] — 2026-10-10
 
 Code-review round on 0.12.1.

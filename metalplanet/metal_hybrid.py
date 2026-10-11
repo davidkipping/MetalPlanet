@@ -144,8 +144,13 @@ inline void mp_hyb_gen(float z, float r, thread float *G,
             dr = MP_TWO_PI * r * a_ / Q32;
         } else {
             // -Bp is -0.0 where z + r rounds to 1: the depth is then
-            // kite^2 / A (see hybrid._pole_terms)
-            float nBp = Bp < 0.0f ? -Bp : kite * kite / A;
+            // kite^2 / A (see hybrid._pole_terms). Near the internal
+            // contact -Bp is the vanishing factor and its product form
+            // carries the rounding of 1 - z - r, so the smaller of A and
+            // -Bp is always taken from kite^2 = A (-Bp) (1.5e-4 of the
+            // column at r = 0.8 before; hybrid._pole_terms)
+            float nBp = (!tot && A >= -Bp) ? kite * kite / A
+                        : (Bp < 0.0f ? -Bp : kite * kite / A);
             float apb = e + A;
             float U = apb * nBp;
             float ratio = (e + Bp) / nBp;           // V = ratio * kite^2

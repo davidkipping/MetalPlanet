@@ -82,6 +82,9 @@ dependency arrow. See [CHANGELOG.md](CHANGELOG.md) for version history
 | `greens.py`   | limb-darkening → Green's-basis transform (any order, host-side) |
 | `ld.py`       | Kipping (2013) (q₁,q₂) ↔ (u₁,u₂) |
 | `anvil.py`    | anvil/applemcmc integration (lazy import; core stays standalone) |
+| `oblate.py`   | oblate planets: the exact MLX graph (fp64 / fp32), per point |
+| `oblate_tau.py` | oblate planets on an orbit: sky frame, per-side contacts, exposures |
+| `metal_oblate.py` | oblate fp32 Metal kernels: forward, VJP (dual-number template), contacts |
 
 ## Install / test
 
@@ -398,6 +401,100 @@ things to know:
 
 rp = 1 exactly is a degenerate point, where the contacts meet at z = 0:
 5e-9 in fp64 and 1e-4 in fp32, finite everywhere.
+
+## Oblate planets: `f`, `theta`
+
+A planet flattened by rotation, or a ringless planet seen with its pole
+tilted, projects to an ellipse. MetalPlanet models it with the hybrid
+laws, from SquishierPlanet's formulation: semi-axes A = rp / sqrt(1 - f)
+and B = A (1 - f), so `rp` stays the **area-equivalent radius**
+sqrt(A B), `f` is the projected flattening 1 - B/A, and `theta` is the sky
+angle of the long axis from the direction of motion at transit (degrees in
+`TransitParams`, radians in `flux_dev_from_tau`). Leave `f` as None for a
+spherical planet: those code paths are untouched, bit for bit.
+
+```python
+from metalplanet import TransitParams, TransitModel, flux_dev_from_tau
+
+p = TransitParams()
+p.t0, p.per, p.rp, p.a, p.inc, p.ecc, p.w = 0.0, 3.45, 0.1, 8.8, 87.0, 0.0, 90.0
+p.limb_dark, p.u = "hybrid5", [0.2, 0.2, 0.1, 0.1, 0.1]
+p.f, p.theta = 0.3, 35.0                  # flattening, long-axis angle [deg]
+flux = TransitModel(p, t).light_curve(p)
+
+dev = flux_dev_from_tau(tau, period, a, b, r, limb_dark="hybrid5", u=w,
+                        f=f, theta=theta,        # scalars or (n,) per chain
+                        exp_time=29.4 / 60 / 24, integration="contact")
+```
+
+Everything the spherical hybrid path does carries over: `light_curve`,
+`light_curves` (per-set f and theta), `light_curve_mx` (differentiable in
+f and theta too), every exposure rule, eccentric orbits, `ld_basis=True`,
+fp64 and fp32. The quadratic law is not available for an oblate planet:
+its mu term has no elementary form along an ellipse. The domain is
+rp <= (1 - f)^(3/2) (0.35 at f = 0.5, 0.59 at f = 0.3), where the planet
+crosses the limb at most twice; outside it a host value raises and an
+array argument gives NaN.
+
+**Accuracy.** In fp64 the columns agree with SquishierPlanet's reference
+to 3e-15 of their unocculted flux over its topology classes and its
+limb- and pole-tangency stress sets, and light curves agree with its
+`model.light_curve` to 6e-16, circular and eccentric. With f = 0 the
+result equals the spherical path's to 2e-17. The fp32 Metal kernels are
+within 2e-7 of fp64 in flux, and their gradients -- tau, period, a, b, r,
+f, theta, every weight, secosw/sesinw -- within 1e-3 of fp64 autodiff,
+typically 1e-5. The contact rule splits each exposure at the oblate
+planet's own contacts, solved per side (a tilted planet's ingress and
+egress differ): on 30-minute exposures that is 4-40x more accurate than
+splitting at the spherical contacts.
+
+**fp32 limits.** Below f = 1e-5 an fp32 chain takes the spherical forms
+(the flattening moves the flux by under 4e-8 there), so d/df is 0 in that
+band; just above it d/df is good to ~1%, improving with f. Within ~1e-6
+of a limb contact fp32 cannot resolve the sliver of overlap: the flux
+lost is ~1e-13 and the gradient ~1e-4, in a window of ~1e-6 in phase.
+
+**Cost.** An oblate planet needs the roots of a quartic per pole level
+per point -- solved by a hand-written 4x4 eigensolver in the kernel, as
+Metal has none -- where a spherical one needs a closed form. Fused fp32
+kernels, 512 chains x 5,000 points around a transit
+(`benchmarks/bench_oblate.py`, M2 Max, quiet machine):
+
+| | forward | vs spherical | value+grad | vs spherical |
+|---|---:|---:|---:|---:|
+| hybrid2, one evaluation per point | 16 ms | 16x | 44 ms | 30x |
+| hybrid5, one evaluation per point | 28 ms | 31x | 77 ms | 37x |
+| hybrid2, contact rule (n_gl = 5) | 481 ms | 83x | 1.31 s | 85x |
+| hybrid5, contact rule (n_gl = 5) | 867 ms | 85x | 2.38 s | 80x |
+
+The contact-rule ratio is large because the spherical hybrid kernel costs
+only ~0.2 ns per node there; the oblate one costs 7-14 ns. Per sampled
+dimension, collapsing the limb-darkening weights with `ld_basis=True`
+(SquishierPlanet's "path B") recovers far more than this.
+
+**Against the other oblate codes** (`benchmarks/oblate_compare/`, the
+spherical benchmark's transit with f = 0.2 at 30 deg, a limb-darkening
+profile all four codes express exactly): in fp64 MetalPlanet, squishyplanet
+and JoJo all reach rounding against a 30-digit integral (2e-16, 9e-16,
+2e-15), GreenLantern (fp32) 4.5e-6 and MetalPlanet fp32 7e-8. Wall time for
+one light curve:
+
+| N | MetalPlanet fp32 (GPU) | GreenLantern (GPU) | JoJo | squishyplanet | MetalPlanet fp64 (CPU) |
+|---:|---:|---:|---:|---:|---:|
+| 10^3 | 1.6 ms | 0.9 ms | 0.7 ms | 4.0 ms | 14 ms |
+| 10^5 | 1.8 ms | 24 ms | 47 ms | 410 ms | 443 ms |
+| 10^7 | 55 ms | 2.3 s | 7.0 s | 44 s | 48 s |
+
+512 parameter sets x 10,000 points: 0.03 s (MetalPlanet fp32), 1.2 s
+(GreenLantern), 2.7 s (JoJo), 31 s (squishyplanet). Value + gradient at
+10^5 points: 4.3 ms, 54 ms (GreenLantern), 2.5 s (squishyplanet); JoJo has
+no gradients. Below ~10^4 points the GPU dispatch floor lets the CPU
+codes win, and MetalPlanet's fp64 graph -- the exact reference -- is no
+faster than squishyplanet. The other codes cover what MetalPlanet does
+not: the standard quadratic law (all three), polynomial laws of any order
+and phase curves (squishyplanet), triaxial planets (squishyplanet,
+GreenLantern). Full tables and the macOS build notes:
+[benchmarks/oblate_compare/RESULTS.md](benchmarks/oblate_compare/RESULTS.md).
 
 ## Sampling per-transit times: `flux_dev_from_tau`
 

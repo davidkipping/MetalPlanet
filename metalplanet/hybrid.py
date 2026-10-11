@@ -383,9 +383,21 @@ def _pole_terms(g, eps: float):
     # the log form and sqrt(-Q) is NaN (fp32, ~1 point in 10 within two
     # ulps of the internal contact; v0.10.7 and before). There the depth
     # is kite^2 / A (kite^2 = A (-Bp)), which is what kite already carries.
-    nBp = mx.where(m_part, mx.where(-Bp > 0.0, -Bp,
-                                    kite * kite / mx.where(g["m_lens"], A,
-                                                           one)),
+    #
+    # Near the INTERNAL contact the roles swap: -Bp = 1 - (z + r)^2 is
+    # the vanishing factor, and its direct product form carries the
+    # rounding of 1 - z - r (relative 3e-4 at 1e-13 from the contact),
+    # while kite (sorted Heron) stays exact. kap1 / (p eps) amplifies the
+    # mismatch by 1/eps: 1.6e-7 at r = 0.8, eps = 0.0016 (0.12.x). So the
+    # smaller of A and -Bp is always taken from kite^2 = A (-Bp), with
+    # the larger -- O(1), accurate -- as the divisor.
+    lens = g["m_lens"]
+    inner = mx.logical_and(lens, A >= -Bp)
+    nBp_k = kite * kite / mx.where(inner, A, one)
+    nBp = mx.where(m_part, mx.where(inner, nBp_k,
+                                    mx.where(-Bp > 0.0, -Bp,
+                                             kite * kite / mx.where(lens, A,
+                                                                    one))),
                    one)
     apb = eps + A                                   # a_ + b_, > 0 always
     U = mx.where(m_part, apb * nBp, one)

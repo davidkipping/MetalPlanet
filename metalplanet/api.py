@@ -92,6 +92,12 @@ class TransitParams:
         self.limb_dark = None     # "uniform" | "linear" | "quadratic"
         self.fp = None            # planet/star flux ratio (secondary)
         self.t_secondary = None   # unused; secondary timing is computed
+        # an oblate planet (hybrid laws only; metalplanet.oblate): projected
+        # flattening f = 1 - B/A, with rp then the area-equivalent radius
+        # sqrt(A B), and theta the sky angle of the long axis from the
+        # direction of motion at transit [degrees]. None = spherical.
+        self.f = None
+        self.theta = None
 
 
 def _u_vector(u, sets=False):
@@ -289,6 +295,20 @@ class TransitModel:
         self.integration = integration
         self.n_gl = int(n_gl)
         self.transittype = transittype
+        # oblate planet: fixed per model, like the law (its own graphs)
+        self._oblate = getattr(params, "f", None) is not None
+        self._batch_keys = self._BATCH_KEYS + (("f", "theta") if self._oblate
+                                               else ())
+        if getattr(params, "theta", None) is not None and not self._oblate:
+            raise ValueError("params.theta is an oblate planet's; set "
+                             "params.f too (or leave both None)")
+        if self._oblate:
+            if _hybrid_law(params.limb_dark) is None:
+                raise ValueError("an oblate planet (params.f) takes a hybrid "
+                                 "law: limb_dark='hybrid2' | 'hybrid4' | "
+                                 "'hybrid5'")
+            if transittype != "primary":
+                raise ValueError("an oblate planet is primary-transit only")
         self.limb_dark = params.limb_dark
         # a hybrid law is resolved ONCE, here: every graph this model traces
         # uses this definition, whatever the registry does afterwards
@@ -589,7 +609,7 @@ class TransitModel:
         # one number (``uv`` is u already normalised by _check_law). A
         # route that never reads a field (w on a circular orbit) still
         # rejects a bad one.
-        for name in self._BATCH_KEYS:
+        for name in self._batch_keys:
             x = getattr(params, name)
             if is_arr(x):
                 _need_scalar(x, name)
@@ -610,6 +630,9 @@ class TransitModel:
             if is_arr(x):
                 return cast(x) * (math.pi / 180.0)
             return cast(math.radians(float(x)))   # on the host, in fp64
+
+        if self._oblate:
+            return self._oblate_eval(params, uv, cast, rad, is_arr)
 
         t0 = params.t0
         if is_arr(t0):
@@ -666,6 +689,86 @@ class TransitModel:
         return self._get_compiled(False)(t0_off, per, a, k, h, ci, rp,
                                          *ld, fp)
 
+    # -- oblate planets ------------------------------------------------------
+    #
+    # One route for every surface: time since each point's own mid-transit,
+    # then metal.flux_dev_from_tau(f=, theta=) -- the oblate Metal kernels
+    # on an fp32 GPU model, the exact graph otherwise -- with this model's
+    # exposure rule (supersampling stays this model's own grid and
+    # average). The spherical graphs above are untouched.
+
+    def _oblate_fn(self, eccentric: bool):
+        key = ("oblate", eccentric)
+        fn = self._compiled.get(key)
+        if fn is not None:
+            return fn
+        from .metal import flux_dev_from_tau
+        contact = self.integration == "contact"
+        kw = dict(limb_dark=self._hlaw,
+                  integration="contact" if contact else "none",
+                  exp_time=self.exp_time if contact else 0.0,
+                  n_gl=self.n_gl)
+
+        def flux(tt, t0, per, a, b, rp, f, th, uv, ecc):
+            tau = tt - t0
+            tau = tau - per * mx.round(tau / per)
+            return 1.0 + flux_dev_from_tau(tau, per, a, b, rp, u=uv, f=f,
+                                           theta=th, **kw, **ecc)
+        if eccentric:
+            def raw(tt, t0, per, a, b, rp, f, th, uv, k, h):
+                return flux(tt, t0, per, a, b, rp, f, th, uv,
+                            dict(secosw=k, sesinw=h))
+        else:
+            def raw(tt, t0, per, a, b, rp, f, th, uv):
+                return flux(tt, t0, per, a, b, rp, f, th, uv, {})
+        fn = mx.compile(raw)
+        self._compiled[key] = fn
+        return fn
+
+    def _oblate_eval(self, params, uv, cast, rad, is_arr):
+        """light_curve / light_curve_mx for an oblate model. b is the
+        impact parameter at conjunction, a cos i (1 - e^2) / (1 + e sin w);
+        an array ecc enters as (k, h) = sqrt(e) (cos w, sin w), so d/de at
+        e = 0 exactly is 0 here (not the one-sided derivative)."""
+        from .oblate import _check_domain
+        _check_domain(params.rp, params.f)
+        t0 = params.t0
+        if is_arr(t0):
+            with mx.stream(mx.cpu):
+                t0_off = (t0.astype(mx.float64) - self._t_ref).astype(self.dtype)
+        else:
+            t0_off = cast(t0 - self._t_ref)
+        per, a, rp = cast(params.per), cast(params.a), cast(params.rp)
+        f = cast(params.f)
+        th = rad(0.0 if params.theta is None else params.theta)
+        inc = params.inc
+        ci = (sincos(rad(inc))[1] if is_arr(inc)
+              else cast(math.cos(math.radians(float(inc)))))
+        ecc, w = params.ecc, params.w
+        if not is_arr(ecc):
+            _check_ecc(float(ecc))
+        if not is_arr(ecc) and float(ecc) == 0.0:
+            b = a * ci
+            return self._oblate_fn(False)(self._t_mx, t0_off, per, a, b, rp,
+                                          f, th, cast(uv))
+        e = cast(ecc)
+        sw, cw = sincos(rad(w))
+        sq = mx.sqrt(mx.maximum(e, 1e-30))
+        k, h = sq * cw, sq * sw
+        b = a * ci * (1.0 - e * e) / (1.0 + e * sw)
+        return self._oblate_fn(True)(self._t_mx, t0_off, per, a, b, rp, f, th,
+                                     cast(uv), k, h)
+
+    def _check_shape_kind(self, params):
+        """Oblate or spherical is fixed per model (separate graphs)."""
+        obl = getattr(params, "f", None) is not None
+        if obl != self._oblate:
+            raise ValueError("params.f changed between None and a value since "
+                             "model construction; build a new TransitModel")
+        if not obl and getattr(params, "theta", None) is not None:
+            raise ValueError("params.theta is an oblate planet's; set "
+                             "params.f too (or leave both None)")
+
     # -- batman-compatible surface ----------------------------------------
 
     def _check_law(self, params, sets=False):
@@ -687,6 +790,8 @@ class TransitModel:
             raise ValueError(
                 "limb-darkening law changed since model construction; "
                 "build a new TransitModel")
+        if not isinstance(params, (list, tuple)):
+            self._check_shape_kind(params)
         u = _u_vector(params.u, sets=sets)
         n_u = u.shape[-1] if sets else len(u)
         if self._n_vec and n_u != self._n_vec:
@@ -724,7 +829,7 @@ class TransitModel:
             if not seq:
                 raise ValueError("no parameter sets given")
             cols = {}
-            for k in self._BATCH_KEYS:
+            for k in self._batch_keys:
                 vals = [getattr(p, k) for p in seq]
                 cols[k] = np.array([0.0 if v is None else float(v)
                                     for v in vals], dtype=np.float64)
@@ -744,7 +849,7 @@ class TransitModel:
         # any subset of the attributes may be arrays; the batch size is
         # the longest of them (scalars broadcast against it)
         sizes = set()
-        for k in self._BATCH_KEYS:
+        for k in self._batch_keys:
             v = getattr(p, k)
             if v is None:
                 continue
@@ -755,7 +860,7 @@ class TransitModel:
                              f"{sorted(sizes)}")
         n = sizes.pop() if sizes else 1
         cols = {}
-        for k in self._BATCH_KEYS:
+        for k in self._batch_keys:
             v = getattr(p, k)
             v = 0.0 if v is None else v
             cols[k] = np.broadcast_to(
@@ -814,7 +919,19 @@ class TransitModel:
                 u1, u2 = _ld_coeffs_batch(self.limb_dark, u_np)
                 u1, u2 = col(u1), col(u2)
 
-            if self.integration == "contact":
+            if self._oblate:
+                from .oblate import _check_domain
+                _check_domain(cols["rp"], cols["f"])
+                w_r = np.radians(cols["w"])
+                b_np = (cols["a"] * np.cos(inc) * (1.0 - ecc * ecc)
+                        / (1.0 + ecc * np.sin(w_r)))
+                args = (self._t_mx[None, :], t0, per, a, col(b_np), rp,
+                        col(cols["f"]), col(np.radians(cols["theta"])), uvec)
+                if bool(np.any(ecc > 0.0)):
+                    out = self._oblate_fn(True)(*args, k, h)
+                else:
+                    out = self._oblate_fn(False)(*args)
+            elif self.integration == "contact":
                 b_np = contact_geometry(
                     cols["a"], ecc, ecc * np.sin(w), np.cos(inc),
                     sqrt=np.sqrt, maximum=np.maximum)[1]

@@ -1590,7 +1590,7 @@ def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1=None, u2=None, *,
                       n_gl: int = 5, n_sub: int = 1,
                       ld_basis: bool = False, secosw=None,
                       sesinw=None, limb_dark: str = "quadratic",
-                      u=None) -> mx.array:
+                      u=None, f=None, theta=None) -> mx.array:
     """F - 1 from time-since-mid-transit, with the exposure integrated
     *inside* the kernel.
 
@@ -1646,6 +1646,18 @@ def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1=None, u2=None, *,
             its (n, m, 1 + n_w) shape-basis columns B = [E0, T_1..T_n],
             and ``flux - 1 == (B @ c)/(N @ c)`` with ``c = (1, -w)``,
             ``N = hybrid.hybrid_norms(law)``.
+        f, theta: an oblate planet (``metalplanet.oblate``): projected
+            flattening f = 1 - B/A and the sky angle of its long axis from
+            the direction of motion at transit, scalars or (n,). ``r`` is
+            then the area-equivalent radius sqrt(A B), with
+            r <= (1 - f)^(3/2). Hybrid laws only. Omit both for a
+            spherical planet (the default, whose paths they do not touch);
+            theta defaults to 0 when f is given. The sky frame and theta
+            are SquishierPlanet's; the contacts are solved per side.
+            fp32 data on the GPU takes the oblate Metal kernels
+            (``metal_oblate``); fp64 the MLX graph on the CPU stream. In
+            fp32, below f = 1e-5 a chain takes the spherical forms and
+            d/df is 0 there (the flattening's effect is under 4e-8).
         secosw, sesinw: (sqrt(e) cos w, sqrt(e) sin w), scalars or (n,).
             Omit both for a circular orbit (the default). Given, the orbit
             is the transit-anchored eccentric one (``anchored.py``), the
@@ -1692,6 +1704,23 @@ def flux_dev_from_tau(tau: mx.array, period, a, b, r, u1=None, u2=None, *,
         mode = _INT_NONE
     if (secosw is None) != (sesinw is None):
         raise ValueError("pass both secosw and sesinw, or neither")
+    if f is not None or theta is not None:
+        if f is None:
+            raise ValueError("theta= is an oblate planet's; pass f= too")
+        if limb_dark == "quadratic":
+            raise ValueError("oblate planets (f=) take a hybrid law: "
+                             "limb_dark='hybrid2' | 'hybrid4' | 'hybrid5'")
+        if u1 is not None or u2 is not None:
+            raise ValueError("u1/u2 are the quadratic law's coefficients; "
+                             f"pass the {limb_dark} weights as u=")
+        if u is None and not ld_basis:
+            raise ValueError(f"{limb_dark} needs its weights as u= unless "
+                             "ld_basis=True")
+        from .oblate_tau import flux_dev_from_tau_oblate
+        return flux_dev_from_tau_oblate(
+            tau, period, a, b, r, f, 0.0 if theta is None else theta,
+            limb_dark, u, float(exp_time), mode, int(n_gl), int(n_sub),
+            bool(ld_basis), secosw, sesinw)
     if limb_dark != "quadratic":
         # a hybrid law (metal_hybrid.py); its own kernels, nothing below
         if u1 is not None or u2 is not None:
